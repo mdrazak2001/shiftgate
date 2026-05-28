@@ -1,0 +1,59 @@
+name: Release and Publish
+
+on:
+  push:
+    tags:
+      - 'v*' # Triggers the pipeline whenever a version tag is pushed, e.g., v0.1.0
+
+jobs:
+  validate:
+    name: Validate and Test Code
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: "pyproject.toml"
+
+      - name: Install dependencies & run tests
+        run: |
+          uv sync --all-extras --dev
+          uv run pytest
+
+  publish:
+    name: Build and Publish to PyPI
+    needs: validate
+    runs-on: ubuntu-latest
+    
+    # Define the target environment configured on PyPI
+    environment:
+      name: pypi
+      url: https://pypi.org/p/shiftgate
+
+    # CRITICAL: This gives the job permission to request an OIDC id-token from GitHub
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Build distribution packages
+        run: uv build
+
+      - name: Publish to PyPI via Trusted Publishing
+        run: uv publish --trusted-publishing always
