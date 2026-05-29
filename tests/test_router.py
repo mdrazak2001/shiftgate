@@ -1,7 +1,6 @@
 """
 Tests for the routing pipeline: embedder, matcher, and router.
 
-The embedder tests use the real fastembed model (skipped if not installed).
 The matcher and router tests use pre-computed synthetic embeddings so they
 are fast, deterministic, and require no model download.
 """
@@ -11,10 +10,10 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from shiftgate.registry.adapter_registry import AdapterRegistry
+from shiftgate.registry.adapter_registry import AdapterRegistry, adapter_from_hf, adapter_from_runtime
 from shiftgate.registry.schemas import AdapterEntry, TaskCluster
 from shiftgate.registry.task_registry import TaskRegistry
-from shiftgate.router.matcher import NoAdapterError, select_adapter, top_k_tasks
+from shiftgate.router.matcher import NoAdapterError, TaskMatch, select_adapter, top_k_tasks
 
 
 # ---------------------------------------------------------------------------
@@ -22,7 +21,6 @@ from shiftgate.router.matcher import NoAdapterError, select_adapter, top_k_tasks
 # ---------------------------------------------------------------------------
 
 def _unit(v: list[float]) -> list[float]:
-    """Return an L2-normalised version of v."""
     arr = np.array(v, dtype=np.float32)
     return (arr / np.linalg.norm(arr)).tolist()
 
@@ -53,10 +51,7 @@ def _make_adapter(adapter_id: str) -> AdapterEntry:
 
 @pytest.fixture()
 def synthetic_tasks() -> list[TaskCluster]:
-    """
-    Three tasks whose centroids are axis-aligned unit vectors in 3D space.
-    This makes similarity scores fully predictable.
-    """
+    """Three tasks whose centroids are axis-aligned unit vectors in 3D space."""
     return [
         _make_task("task_x", [1, 0, 0], ["adapter-x"]),
         _make_task("task_y", [0, 1, 0], ["adapter-y"]),
@@ -66,8 +61,7 @@ def synthetic_tasks() -> list[TaskCluster]:
 
 @pytest.fixture()
 def task_reg(synthetic_tasks, tmp_path) -> TaskRegistry:
-    reg = TaskRegistry(tasks=synthetic_tasks, source_path=tmp_path / "tasks.json")
-    return reg
+    return TaskRegistry(tasks=synthetic_tasks, source_path=tmp_path / "tasks.json")
 
 
 @pytest.fixture()
@@ -86,16 +80,21 @@ def adapter_reg(tmp_path) -> AdapterRegistry:
 
 class TestTopKTasks:
     def test_closest_task_is_first(self, synthetic_tasks):
-        """A query aligned with task_y should rank task_y first."""
         query_emb = np.array([0.0, 1.0, 0.0], dtype=np.float32)
         ranked = top_k_tasks(query_emb, synthetic_tasks, k=3)
-        assert ranked[0][0].id == "task_y"
+        assert ranked[0].task.id == "task_y"
+
+    def test_returns_task_match_objects(self, synthetic_tasks):
+        query_emb = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        ranked = top_k_tasks(query_emb, synthetic_tasks, k=1)
+        assert isinstance(ranked[0], TaskMatch)
+        assert isinstance(ranked[0].task, TaskCluster)
+        assert isinstance(ranked[0].score, float)
 
     def test_scores_descending(self, synthetic_tasks):
-        """Returned scores must be sorted highest first."""
         query_emb = np.array([0.6, 0.8, 0.0], dtype=np.float32)
         ranked = top_k_tasks(query_emb, synthetic_tasks, k=3)
-        scores = [s for _, s in ranked]
+        scores = [tm.score for tm in ranked]
         assert scores == sorted(scores, reverse=True)
 
     def test_top_k_limits_results(self, synthetic_tasks):
@@ -104,11 +103,10 @@ class TestTopKTasks:
         assert len(ranked) == 2
 
     def test_no_centroid_tasks_are_skipped(self, synthetic_tasks):
-        """Tasks missing a centroid should not appear in results."""
-        synthetic_tasks[0].embedding_centroid = None  # remove task_x centroid
+        synthetic_tasks[0].embedding_centroid = None
         query_emb = np.array([1.0, 0.0, 0.0], dtype=np.float32)
         ranked = top_k_tasks(query_emb, synthetic_tasks, k=3)
-        task_ids = [t.id for t, _ in ranked]
+        task_ids = [tm.task.id for tm in ranked]
         assert "task_x" not in task_ids
 
     def test_raises_if_all_centroids_missing(self, synthetic_tasks):
@@ -121,16 +119,14 @@ class TestTopKTasks:
     def test_query_aligned_with_task_x(self, synthetic_tasks):
         query_emb = np.array([1.0, 0.0, 0.0], dtype=np.float32)
         ranked = top_k_tasks(query_emb, synthetic_tasks, k=1)
-        assert ranked[0][0].id == "task_x"
-        assert ranked[0][1] == pytest.approx(1.0, abs=1e-5)
+        assert ranked[0].task.id == "task_x"
+        assert ranked[0].score == pytest.approx(1.0, abs=1e-5)
 
     def test_diagonal_query_ranks_two_tasks_close(self, synthetic_tasks):
-        """A query pointing between task_x and task_y should rank both near the top."""
-        # 45-degree angle: equal similarity to task_x and task_y
         v = 1.0 / (2 ** 0.5)
         query_emb = np.array([v, v, 0.0], dtype=np.float32)
         ranked = top_k_tasks(query_emb, synthetic_tasks, k=2)
-        top_ids = {t.id for t, _ in ranked}
+        top_ids = {tm.task.id for tm in ranked}
         assert "task_x" in top_ids
         assert "task_y" in top_ids
 
@@ -143,28 +139,40 @@ class TestSelectAdapter:
     def test_selects_preferred_adapter(self, synthetic_tasks, adapter_reg):
         query_emb = np.array([1.0, 0.0, 0.0], dtype=np.float32)
         ranked = top_k_tasks(query_emb, synthetic_tasks, k=3)
-        adapter, task, score = select_adapter(ranked, adapter_reg)
-        assert adapter.id == "adapter-x"
-        assert task.id == "task_x"
-        assert score == pytest.approx(1.0, abs=1e-5)
+        result = select_adapter(ranked, adapter_reg)
+        assert result.selected_adapter.id == "adapter-x"
+        assert result.matched_task.id == "task_x"
+        assert result.similarity_score == pytest.approx(1.0, abs=1e-5)
+        assert result.selection_method == "preferred"
+
+    def test_match_result_has_all_task_matches(self, synthetic_tasks, adapter_reg):
+        query_emb = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        ranked = top_k_tasks(query_emb, synthetic_tasks, k=3)
+        result = select_adapter(ranked, adapter_reg)
+        assert len(result.all_task_matches) == 3
+
+    def test_candidate_adapters_populated_on_tasks(self, synthetic_tasks, adapter_reg):
+        """Each TaskMatch should have candidate_adapters filled in after select_adapter."""
+        query_emb = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        ranked = top_k_tasks(query_emb, synthetic_tasks, k=3)
+        result = select_adapter(ranked, adapter_reg)
+        # The winning task must have at least one candidate adapter.
+        winning_tm = next(tm for tm in result.all_task_matches if tm.task.id == result.matched_task.id)
+        assert len(winning_tm.candidate_adapters) >= 1
 
     def test_falls_through_to_second_task_when_first_adapter_missing(
         self, synthetic_tasks, tmp_path
     ):
-        """If the best task's adapter isn't in the registry, the next task's adapter wins."""
-        # Only adapter-y and adapter-z exist
         adapter_reg_partial = AdapterRegistry(
             adapters=[_make_adapter("adapter-y"), _make_adapter("adapter-z")],
             source_path=tmp_path / "adapters.json",
         )
         query_emb = np.array([1.0, 0.0, 0.0], dtype=np.float32)
         ranked = top_k_tasks(query_emb, synthetic_tasks, k=3)
-        adapter, task, score = select_adapter(ranked, adapter_reg_partial)
-        # task_x has no matching adapter → falls through to task_y or task_z
-        assert adapter.id in {"adapter-y", "adapter-z"}
+        result = select_adapter(ranked, adapter_reg_partial)
+        assert result.selected_adapter.id in {"adapter-y", "adapter-z"}
 
     def test_raises_no_adapter_error_when_registry_empty(self, synthetic_tasks, tmp_path):
-        """NoAdapterError is raised only when the registry has zero adapters."""
         empty_reg = AdapterRegistry(adapters=[], source_path=tmp_path / "adapters.json")
         query_emb = np.array([1.0, 0.0, 0.0], dtype=np.float32)
         ranked = top_k_tasks(query_emb, synthetic_tasks, k=3)
@@ -173,7 +181,6 @@ class TestSelectAdapter:
 
     def test_tag_overlap_fallback_when_preferred_lists_empty(self, tmp_path):
         """If preferred_adapters is empty for all tasks, adapter tags are used as fallback."""
-        # Tasks have no preferred/fallback lists — mirrors the default_tasks.json situation.
         task_sql = _make_task("code_sql", [0, 1, 0], adapter_ids=[])
         task_py  = _make_task("code_python", [1, 0, 0], adapter_ids=[])
 
@@ -185,15 +192,14 @@ class TestSelectAdapter:
         )
         reg = AdapterRegistry(adapters=[sql_adapter], source_path=tmp_path / "adapters.json")
 
-        # Query pointing at code_sql
         query_emb = np.array([0.0, 1.0, 0.0], dtype=np.float32)
         ranked = top_k_tasks(query_emb, [task_sql, task_py], k=2)
-        adapter, task, score = select_adapter(ranked, reg)
+        result = select_adapter(ranked, reg)
 
-        assert adapter.id == "sql-lora"
+        assert result.selected_adapter.id == "sql-lora"
+        assert result.selection_method == "tag_overlap"
 
     def test_tag_overlap_selects_best_matching_adapter(self, tmp_path):
-        """When multiple adapters are registered, the one with most tag overlap wins."""
         task_sql = _make_task("code_sql", [0, 1, 0], adapter_ids=[])
 
         sql_adapter = AdapterEntry(id="sql-lora", name="SQL", base_model="x", task_tags=["sql", "code"])
@@ -202,13 +208,11 @@ class TestSelectAdapter:
         reg = AdapterRegistry(adapters=[sql_adapter, py_adapter], source_path=tmp_path / "adapters.json")
         query_emb = np.array([0.0, 1.0, 0.0], dtype=np.float32)
         ranked = top_k_tasks(query_emb, [task_sql], k=1)
-        adapter, _, _ = select_adapter(ranked, reg)
+        result = select_adapter(ranked, reg)
 
-        # "sql" and "code" both appear in "code_sql" → 2 overlapping tokens vs 0 for py-lora
-        assert adapter.id == "sql-lora"
+        assert result.selected_adapter.id == "sql-lora"
 
     def test_fallback_adapters_are_tried(self, tmp_path):
-        """preferred list empty but fallback_adapters has a match."""
         task_with_fallback = TaskCluster(
             id="fallback_task",
             name="Fallback Task",
@@ -224,8 +228,9 @@ class TestSelectAdapter:
         )
         query_emb = np.array([1.0, 0.0, 0.0], dtype=np.float32)
         ranked = top_k_tasks(query_emb, [task_with_fallback], k=1)
-        adapter, task, _ = select_adapter(ranked, reg)
-        assert adapter.id == "fallback-adapter"
+        result = select_adapter(ranked, reg)
+        assert result.selected_adapter.id == "fallback-adapter"
+        assert result.selection_method == "fallback"
 
 
 # ---------------------------------------------------------------------------
@@ -237,7 +242,7 @@ class MockEmbedder:
 
     _MAP = {
         "python": np.array([1.0, 0.0, 0.0], dtype=np.float32),
-        "sql": np.array([0.0, 1.0, 0.0], dtype=np.float32),
+        "sql":    np.array([0.0, 1.0, 0.0], dtype=np.float32),
         "generic": np.array([0.0, 0.0, 1.0], dtype=np.float32),
     }
 
@@ -252,18 +257,19 @@ class MockEmbedder:
 
 
 class TestRouteFunction:
-    def test_route_returns_trace(self, task_reg, adapter_reg):
+    def test_route_returns_trace_and_match_result(self, task_reg, adapter_reg):
+        from shiftgate.router.matcher import MatchResult
         from shiftgate.router.router import route
 
-        trace = route("write python code", task_reg, adapter_reg, MockEmbedder())
+        trace, result = route("write python code", task_reg, adapter_reg, MockEmbedder())
         assert trace.matched_task_id == "task_x"
         assert trace.selected_adapter_id == "adapter-x"
-        assert 0.0 <= trace.similarity_score <= 1.0
+        assert isinstance(result, MatchResult)
 
     def test_route_sql_query(self, task_reg, adapter_reg):
         from shiftgate.router.router import route
 
-        trace = route("write a sql query", task_reg, adapter_reg, MockEmbedder())
+        trace, result = route("write a sql query", task_reg, adapter_reg, MockEmbedder())
         assert trace.matched_task_id == "task_y"
         assert trace.selected_adapter_id == "adapter-y"
 
@@ -283,9 +289,24 @@ class TestRouteFunction:
     def test_route_trace_has_required_fields(self, task_reg, adapter_reg):
         from shiftgate.router.router import route
 
-        trace = route("generic task", task_reg, adapter_reg, MockEmbedder())
-        assert trace.id  # non-empty
+        trace, _ = route("generic task", task_reg, adapter_reg, MockEmbedder())
+        assert trace.id
         assert trace.timestamp
         assert trace.query == "generic task"
         assert trace.accepted is None
         assert trace.latency_ms is None
+
+    def test_route_match_result_has_all_tasks(self, task_reg, adapter_reg):
+        from shiftgate.router.router import route
+
+        _, result = route("python task", task_reg, adapter_reg, MockEmbedder())
+        assert len(result.all_task_matches) == 3  # top_k default is 3
+
+    def test_runtime_adapter_effective_name(self):
+        """effective_backend_name() returns runtime_name when set."""
+        adapter = adapter_from_runtime("vllm-sql", adapter_id="sql-lora")
+        assert adapter.effective_backend_name() == "vllm-sql"
+
+    def test_hf_adapter_effective_name_falls_back_to_id(self):
+        adapter = adapter_from_hf("org/sql-lora", adapter_id="sql-lora")
+        assert adapter.effective_backend_name() == "sql-lora"

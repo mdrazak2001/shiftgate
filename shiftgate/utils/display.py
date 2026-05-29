@@ -49,6 +49,17 @@ def _similarity_bar(score: float, width: int = 20) -> Text:
     return text
 
 
+def _adapter_source_label(adapter: AdapterEntry) -> str:
+    """Return a short label describing where the adapter lives."""
+    if adapter.runtime_name:
+        return f"runtime:{adapter.runtime_name}"
+    if adapter.hf_repo:
+        return f"hf:{adapter.hf_repo}"
+    if adapter.local_path:
+        return f"local:{adapter.local_path}"
+    return "—"
+
+
 # ---------------------------------------------------------------------------
 # Routing decision panel
 # ---------------------------------------------------------------------------
@@ -91,8 +102,9 @@ def show_routing_decision(
         adapter_text = Text()
         adapter_text.append(adapter.name, style="bold magenta")
         adapter_text.append(f"  [{adapter.base_model}]", style="dim")
-        if adapter.hf_repo:
-            adapter_text.append(f"\n  hf: {adapter.hf_repo}", style="dim blue")
+        source = _adapter_source_label(adapter)
+        if source != "—":
+            adapter_text.append(f"\n  {source}", style="dim blue")
         grid.add_row("Adapter", adapter_text)
     else:
         grid.add_row("Adapter", Text(trace.selected_adapter_id, style="bold magenta"))
@@ -115,13 +127,98 @@ def show_routing_decision(
 
 
 # ---------------------------------------------------------------------------
+# --explain view
+# ---------------------------------------------------------------------------
+
+def show_explain_decision(
+    trace: RoutingTrace,
+    match_result,  # MatchResult — avoid circular import
+    adapter_registry=None,
+    task_registry=None,
+) -> None:
+    """Print the full routing decision tree for ``shiftgate route --explain``.
+
+    Shows:
+      • Top task matches with similarity scores
+      • Candidate adapters found for each task
+      • Which adapter was selected and why
+    """
+    from shiftgate.router.matcher import MatchResult  # local import avoids circularity
+
+    console.print()
+    console.rule("[bold cyan]Routing explanation[/bold cyan]")
+    console.print()
+
+    # --- Query ---
+    console.print(f'  [dim]Query:[/dim]  [italic cyan]"{trace.query}"[/italic cyan]')
+    console.print()
+
+    # --- Task match table ---
+    task_table = Table(
+        title="Task similarity ranking",
+        box=box.SIMPLE_HEAVY,
+        show_header=True,
+        header_style="bold cyan",
+        border_style="dim",
+        expand=False,
+    )
+    task_table.add_column("#", justify="right", style="dim", width=3)
+    task_table.add_column("Task ID", style="yellow")
+    task_table.add_column("Task Name")
+    task_table.add_column("Similarity", justify="right")
+    task_table.add_column("Score bar")
+    task_table.add_column("Candidate Adapters", style="magenta")
+
+    for rank, tm in enumerate(match_result.all_task_matches, start=1):
+        is_winner = tm.task.id == trace.matched_task_id
+        rank_str = f"[bold green]▶ {rank}[/bold green]" if is_winner else str(rank)
+        score_pct = f"{tm.score * 100:.1f}%"
+        candidates = (
+            ", ".join(a.id for a in tm.candidate_adapters) if tm.candidate_adapters else "[dim]none[/dim]"
+        )
+        task_table.add_row(
+            rank_str,
+            tm.task.id,
+            tm.task.name,
+            score_pct,
+            _similarity_bar(tm.score, width=12),
+            candidates,
+        )
+
+    console.print(task_table)
+    console.print()
+
+    # --- Selection summary ---
+    method_labels = {
+        "preferred": "[green]preferred_adapters list[/green]",
+        "fallback": "[yellow]fallback_adapters list[/yellow]",
+        "tag_overlap": "[yellow]tag-overlap fallback[/yellow] (adapter not in any task list yet — run `shiftgate adapter add` with matching tags)",
+    }
+    method_display = method_labels.get(match_result.selection_method, match_result.selection_method)
+
+    selected = match_result.selected_adapter
+    console.print(f"  [bold]Selected adapter:[/bold]  [bold magenta]{selected.id}[/bold magenta]")
+    console.print(f"  [bold]Base model:[/bold]        {selected.base_model}")
+    console.print(f"  [bold]Source:[/bold]            {_adapter_source_label(selected)}")
+    console.print(f"  [bold]Selection method:[/bold]  {method_display}")
+    console.print()
+    console.rule()
+    console.print()
+
+
+# ---------------------------------------------------------------------------
 # Adapter table
 # ---------------------------------------------------------------------------
 
 def show_adapter_table(adapters: list[AdapterEntry]) -> None:
     """Print a Rich table listing all registered adapters."""
     if not adapters:
-        console.print("[dim]No adapters registered. Add one with `shiftgate adapter add <hf_repo>`.[/dim]")
+        console.print(
+            "[dim]No adapters registered.\n"
+            "  Add one:  shiftgate adapter add <hf_repo>\n"
+            "            shiftgate adapter add <id> --local /path/to/adapter\n"
+            "            shiftgate adapter add <id> --runtime my-lora[/dim]"
+        )
         return
 
     table = Table(
@@ -135,14 +232,14 @@ def show_adapter_table(adapters: list[AdapterEntry]) -> None:
     table.add_column("Name")
     table.add_column("Base Model", style="dim")
     table.add_column("Tags", style="green")
-    table.add_column("HF Repo / Local Path", style="blue")
+    table.add_column("Source", style="blue")
     table.add_column("Score", justify="right")
 
     for a in adapters:
-        location = a.hf_repo or a.local_path or "—"
+        source = _adapter_source_label(a)
         score = f"{a.benchmark_score:.2f}" if a.benchmark_score is not None else "—"
         tags = ", ".join(a.task_tags) if a.task_tags else "—"
-        table.add_row(a.id, a.name, a.base_model, tags, location, score)
+        table.add_row(a.id, a.name, a.base_model, tags, source, score)
 
     console.print(table)
 
@@ -229,15 +326,7 @@ def show_welcome_banner() -> None:
 # ---------------------------------------------------------------------------
 
 def show_feedback_stats(scores: dict[str, float], stats: dict[str, int]) -> None:
-    """Print a summary of adapter acceptance rates and overall trace stats.
-
-    Parameters
-    ----------
-    scores:
-        Output of ``feedback.loop.compute_adapter_scores()``.
-    stats:
-        Output of ``feedback.loop.get_trace_stats()``.
-    """
+    """Print a summary of adapter acceptance rates and overall trace stats."""
     console.print()
     console.print(
         f"[bold]Traces:[/bold]  "

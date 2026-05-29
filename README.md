@@ -2,7 +2,11 @@
 
 > **shiftgate is an intelligent routing layer that automatically selects the right LoRA adapter for each task in your local agent loop.**
 
-Instead of hardcoding which adapter to use, shiftgate embeds your query and matches it against a catalog of task clusters using cosine similarity — then routes inference to the best-fit LoRA adapter on your running Ollama or vLLM instance. Think of it as "npm for LoRA adapters + an automatic brain that picks the right one per task."
+**Shiftgate is a routing layer. Users manage models and LoRA weights themselves.**  
+shiftgate stores only adapter *metadata* — it never downloads, caches, or manages weights.
+Your inference backend (Ollama, vLLM) is responsible for loading the weights; shiftgate just tells it *which* adapter to use for each query.
+
+Instead of hardcoding which adapter to use, shiftgate embeds your query and matches it against a catalog of task clusters using cosine similarity — then routes inference to the best-fit LoRA adapter on your running Ollama or vLLM instance.
 
 Inspired by the [LORAUTER paper](https://arxiv.org/abs/2406.08213) (EPFL, 2026).
 
@@ -14,18 +18,25 @@ Inspired by the [LORAUTER paper](https://arxiv.org/abs/2406.08213) (EPFL, 2026).
 # 1. Install (requires Python 3.10+, uv recommended)
 uv add shiftgate
 
-# 2. Initialise: sets up ~/.shiftgate/, downloads the embedding model,
-#    and computes task centroids
+# 2. Initialise: sets up ~/.shiftgate/ and computes task embeddings
 shiftgate init
 
-# 3. Register a LoRA adapter from HuggingFace
-shiftgate adapter add monology/pmc-llama-13b-lora --base meta-llama/Meta-Llama-3-8B --tags medical qa
+# 3. Register an adapter — choose the mode that matches your setup:
+#    A) HuggingFace repo (metadata only, no download)
+shiftgate adapter add teknium/sql-lora --tags sql --base llama3
+#    B) Local adapter weights already on disk
+shiftgate adapter add sql-lora --local /models/sql-lora --tags sql --base llama3
+#    C) Adapter already loaded in your backend (vLLM --lora-modules, Ollama Modelfile)
+shiftgate adapter add sql-lora --runtime sql-lora-vllm --tags sql --base llama3
 
-# 4. Route a query (shows decision, no inference needed)
-shiftgate route "explain the mechanism of action of ibuprofen"
+# 4. Route a query (shows decision — no inference needed)
+shiftgate route "write a SQL query to find duplicate rows"
 
-# 5. Route + run (requires Ollama or vLLM running locally)
-shiftgate run "explain the mechanism of action of ibuprofen"
+# 5. Show the full decision tree
+shiftgate route "write a SQL query to find duplicate rows" --explain
+
+# 6. Route + run (requires Ollama or vLLM running locally)
+shiftgate run "write a SQL query to find duplicate rows"
 ```
 
 ---
@@ -84,10 +95,13 @@ User query
 
 | Command | Description |
 |---|---|
-| `shiftgate init` | First-time setup: copy defaults to `~/.shiftgate/`, compute embeddings |
+| `shiftgate init` | First-time setup: initialise `~/.shiftgate/`, compute task embeddings |
 | `shiftgate route "<query>"` | Route a query and show the decision — no inference |
+| `shiftgate route "<query>" --explain` | Full decision tree: task scores, candidates, selection reason |
 | `shiftgate run "<query>"` | Route + run via Ollama or vLLM |
-| `shiftgate adapter add <hf_repo>` | Register a new LoRA adapter |
+| `shiftgate adapter add <hf_repo> [--tags …] [--base …]` | Register adapter from HuggingFace (metadata only) |
+| `shiftgate adapter add <id> --local <path> [--tags …]` | Register a local adapter path |
+| `shiftgate adapter add <id> --runtime <name> [--tags …]` | Register a backend-loaded adapter by its runtime name |
 | `shiftgate adapter list` | Table of all registered adapters |
 | `shiftgate adapter remove <id>` | Remove an adapter |
 | `shiftgate task list` | Table of all task clusters |
@@ -100,41 +114,63 @@ User query
 
 ---
 
-## Using with Ollama
+## Bring Your Own Models
 
-Ollama supports LoRA adapters via custom Modelfiles. Create one per adapter:
+Shiftgate is a routing layer. It stores adapter metadata only.  
+**You are responsible for loading weights into your inference backend before running `shiftgate run`.**
+
+### Using with Ollama (Mode B or C)
+
+Create a Modelfile that bundles your base model and adapter:
 
 ```dockerfile
-# my-lora.Modelfile
+# my-sql-lora.Modelfile
 FROM llama3
-ADAPTER /path/to/my-adapter.safetensors
+ADAPTER /path/to/sql-lora.safetensors
 ```
 
 ```bash
-ollama create my-lora-model -f my-lora.Modelfile
+ollama create sql-lora-ollama -f my-sql-lora.Modelfile
 ollama serve
 ```
 
-Register the adapter in shiftgate using the same ID:
+Register in shiftgate using the Ollama model name as `--runtime`:
 
 ```bash
-shiftgate adapter add my-org/my-lora --base meta-llama/Meta-Llama-3-8B
-# The adapter id defaults to the repo slug: "my-lora"
-# shiftgate will pass model="my-lora" to Ollama → activates the Modelfile
+# Mode C — backend already has the adapter loaded
+shiftgate adapter add sql-lora --runtime sql-lora-ollama --tags sql --base llama3
 ```
 
-## Using with vLLM
+shiftgate passes `runtime_name` (or falls back to `id`) as the Ollama model name.
 
-vLLM loads LoRA adapters at startup via `--lora-modules`:
+### Using with vLLM (Mode B or C)
+
+Load adapters at server start with `--lora-modules`:
 
 ```bash
 python -m vllm.entrypoints.openai.api_server \
     --model meta-llama/Meta-Llama-3-8B \
     --enable-lora \
-    --lora-modules my-lora=/path/to/adapter
+    --lora-modules sql-lora=/path/to/sql-lora
 ```
 
-shiftgate sends `"model": "<adapter_id>"` in each `/v1/chat/completions` request, which vLLM maps to the named LoRA module.
+Register in shiftgate:
+
+```bash
+# Mode C — adapter name matches the --lora-modules key
+shiftgate adapter add sql-lora --runtime sql-lora --tags sql --base meta-llama/Meta-Llama-3-8B
+```
+
+shiftgate sends `"model": "<runtime_name>"` in each `/v1/chat/completions` request.
+
+### Registering a HuggingFace adapter (Mode A)
+
+```bash
+# Metadata only — no weights downloaded
+shiftgate adapter add teknium/sql-lora --tags sql --base llama3
+```
+
+This is useful for cataloguing adapters before you have pulled their weights.
 
 ---
 

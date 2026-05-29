@@ -15,7 +15,7 @@ from shiftgate.registry.adapter_registry import AdapterRegistry
 from shiftgate.registry.schemas import RoutingTrace
 from shiftgate.registry.task_registry import TaskRegistry
 from shiftgate.router.embedder import Embedder
-from shiftgate.router.matcher import NoAdapterError, select_adapter, top_k_tasks
+from shiftgate.router.matcher import MatchResult, NoAdapterError, select_adapter, top_k_tasks
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +26,7 @@ def route(
     adapter_registry: AdapterRegistry,
     embedder: Embedder,
     top_k: int = 3,
-) -> RoutingTrace:
+) -> tuple[RoutingTrace, MatchResult]:
     """Route a query string to the best matching adapter.
 
     Steps
@@ -34,7 +34,7 @@ def route(
     1. Embed the query with the frozen embedding model.
     2. Compute cosine similarity against all task centroid embeddings.
     3. Select the highest-ranked task whose preferred adapters exist.
-    4. Build and return a ``RoutingTrace``.
+    4. Build and return a ``RoutingTrace`` and the full ``MatchResult``.
 
     Parameters
     ----------
@@ -47,13 +47,12 @@ def route(
     embedder:
         ``Embedder`` instance (wraps fastembed singleton).
     top_k:
-        Number of top task candidates to consider when walking the fallback
-        chain.  Defaults to 3.
+        Number of top task candidates to consider.  Defaults to 3.
 
     Returns
     -------
-    A ``RoutingTrace`` describing the decision.  The trace is **not**
-    persisted here — call ``feedback.loop.record_trace(trace)`` separately.
+    ``(RoutingTrace, MatchResult)`` — the trace for persistence/feedback and
+    the full match result for detailed display (e.g. ``--explain``).
 
     Raises
     ------
@@ -67,31 +66,26 @@ def route(
             "Task embeddings are not initialised. Run `shiftgate init` first."
         )
 
-    # Step 1: embed the query
     query_embedding = embedder.embed(query)
-
-    # Step 2: rank tasks by similarity
     all_tasks = task_registry.get_all_tasks()
     ranked = top_k_tasks(query_embedding, all_tasks, k=top_k)
+    result = select_adapter(ranked, adapter_registry)
 
-    # Step 3: pick the best adapter
-    adapter, matched_task, score = select_adapter(ranked, adapter_registry)
-
-    # Step 4: assemble trace
     trace = RoutingTrace(
         id=uuid.uuid4().hex,
         query=query,
-        matched_task_id=matched_task.id,
-        similarity_score=score,
-        selected_adapter_id=adapter.id,
+        matched_task_id=result.matched_task.id,
+        similarity_score=result.similarity_score,
+        selected_adapter_id=result.selected_adapter.id,
         timestamp=datetime.now(timezone.utc).isoformat(),
     )
 
     logger.info(
-        "Routed '%s' → task='%s' (%.2f%%) → adapter='%s'",
+        "Routed '%s' → task='%s' (%.2f%%) → adapter='%s' [%s]",
         query[:60],
-        matched_task.id,
-        score * 100,
-        adapter.id,
+        result.matched_task.id,
+        result.similarity_score * 100,
+        result.selected_adapter.id,
+        result.selection_method,
     )
-    return trace
+    return trace, result

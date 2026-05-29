@@ -1,7 +1,8 @@
 """
 Tests for the adapter and task registries.
 
-Covers: add/get/list, save/load round-trip, and duplicate handling.
+Covers: add/get/list, save/load round-trip, duplicate handling,
+three registration modes, and the _auto_link_adapter helper.
 All file I/O is redirected to a temporary directory via monkeypatching so
 tests never pollute ~/.shiftgate/.
 """
@@ -13,7 +14,12 @@ from pathlib import Path
 
 import pytest
 
-from shiftgate.registry.adapter_registry import AdapterRegistry
+from shiftgate.registry.adapter_registry import (
+    AdapterRegistry,
+    adapter_from_hf,
+    adapter_from_local,
+    adapter_from_runtime,
+)
 from shiftgate.registry.schemas import AdapterEntry, TaskCluster
 from shiftgate.registry.task_registry import TaskRegistry
 
@@ -72,9 +78,9 @@ def sample_task() -> TaskCluster:
 # ---------------------------------------------------------------------------
 
 class TestAdapterRegistry:
-    def test_empty_registry(self, tmp_shiftgate):
-        """Loading with no file yields an empty registry."""
-        reg = AdapterRegistry(adapters=[], source_path=tmp_shiftgate / "adapters.json")
+    def test_empty_registry_when_no_file(self, tmp_shiftgate):
+        """Loading with no file yields an empty registry (no error)."""
+        reg = AdapterRegistry.load()
         assert len(reg) == 0
         assert reg.list_adapters() == []
 
@@ -140,6 +146,103 @@ class TestAdapterRegistry:
         assert loaded.hf_repo == "test-user/test-lora"
         assert loaded.task_tags == ["code", "python"]
 
+    def test_backward_compat_old_entries_without_runtime_name(self, tmp_shiftgate, monkeypatch):
+        """Old adapters.json files without runtime_name should load cleanly."""
+        import shiftgate.registry.adapter_registry as ar_mod
+
+        save_path = tmp_shiftgate / "adapters.json"
+        monkeypatch.setattr(ar_mod, "_USER_ADAPTERS_PATH", save_path)
+
+        # Write a legacy entry that lacks runtime_name and other new fields.
+        legacy_data = [
+            {
+                "id": "old-lora",
+                "name": "Old LoRA",
+                "base_model": "llama2",
+                "task_tags": ["code"],
+                "description": "Legacy entry",
+                "hf_repo": "org/old-lora",
+                "local_path": None,
+                "benchmark_score": None,
+                "context_length": 4096,   # field removed in v0.1 BYOM; should be ignored
+                "memory_mb": None,         # same
+            }
+        ]
+        save_path.write_text(json.dumps(legacy_data))
+
+        reg = AdapterRegistry.load()
+        assert len(reg) == 1
+        adapter = reg.get_adapter("old-lora")
+        assert adapter is not None
+        assert adapter.runtime_name is None   # new field defaults correctly
+
+
+# ---------------------------------------------------------------------------
+# Registration-mode factory tests
+# ---------------------------------------------------------------------------
+
+class TestRegistrationModes:
+    def test_adapter_from_hf_basic(self):
+        adapter = adapter_from_hf(
+            "teknium/sql-lora",
+            tags=["sql"],
+            base_model="llama3",
+        )
+        assert adapter.id == "sql-lora"
+        assert adapter.hf_repo == "teknium/sql-lora"
+        assert adapter.local_path is None
+        assert adapter.runtime_name is None
+        assert adapter.task_tags == ["sql"]
+        assert adapter.base_model == "llama3"
+
+    def test_adapter_from_hf_custom_id(self):
+        adapter = adapter_from_hf("org/my-adapter", adapter_id="custom-id")
+        assert adapter.id == "custom-id"
+
+    def test_adapter_from_hf_slug_derivation(self):
+        """Slug is the last path component, lowercased, underscores→hyphens."""
+        adapter = adapter_from_hf("org/My_Adapter_v2")
+        assert adapter.id == "my-adapter-v2"
+
+    def test_adapter_from_local(self):
+        adapter = adapter_from_local(
+            local_path="/models/sql-lora",
+            adapter_id="sql-lora",
+            tags=["sql"],
+            base_model="llama3",
+        )
+        assert adapter.id == "sql-lora"
+        assert adapter.local_path == "/models/sql-lora"
+        assert adapter.hf_repo is None
+        assert adapter.runtime_name is None
+        assert adapter.task_tags == ["sql"]
+
+    def test_adapter_from_runtime(self):
+        adapter = adapter_from_runtime(
+            runtime_name="sql-lora-vllm",
+            adapter_id="sql-lora",
+            tags=["sql"],
+            base_model="llama3",
+        )
+        assert adapter.id == "sql-lora"
+        assert adapter.runtime_name == "sql-lora-vllm"
+        assert adapter.hf_repo is None
+        assert adapter.local_path is None
+
+    def test_adapter_from_runtime_slug_default_id(self):
+        """When adapter_id omitted, slug is derived from runtime_name."""
+        adapter = adapter_from_runtime("sql-lora-vllm")
+        assert adapter.id == "sql-lora-vllm"
+        assert adapter.runtime_name == "sql-lora-vllm"
+
+    def test_effective_backend_name_prefers_runtime_name(self):
+        adapter = adapter_from_runtime("vllm-name", adapter_id="my-lora")
+        assert adapter.effective_backend_name() == "vllm-name"
+
+    def test_effective_backend_name_falls_back_to_id(self):
+        adapter = adapter_from_hf("org/my-lora", adapter_id="my-lora")
+        assert adapter.effective_backend_name() == "my-lora"
+
 
 # ---------------------------------------------------------------------------
 # TaskRegistry tests
@@ -175,7 +278,6 @@ class TestTaskRegistry:
         assert reg.remove_task("phantom") is False
 
     def test_embeddings_not_ready_without_centroid(self, tmp_shiftgate, sample_task):
-        """A task without a centroid means embeddings are not ready."""
         assert sample_task.embedding_centroid is None
         reg = TaskRegistry(tasks=[sample_task], source_path=tmp_shiftgate / "tasks.json")
         assert reg.embeddings_ready() is False
@@ -223,8 +325,6 @@ class TestTaskRegistry:
 # ---------------------------------------------------------------------------
 
 class TestAutoLinkAdapter:
-    """Tests for the cli._auto_link_adapter helper."""
-
     def _make_task_reg(self, task_ids: list[str], tmp_path) -> TaskRegistry:
         tasks = [
             TaskCluster(
@@ -259,14 +359,13 @@ class TestAutoLinkAdapter:
 
         linked = _auto_link_adapter(adapter, task_reg)
 
-        # "code" matches "code_sql" and "code_python" but not "text_summarize"
         assert set(linked) == {"code_sql", "code_python"}
 
     def test_no_duplicate_links(self, tmp_path):
         from shiftgate.cli import _auto_link_adapter
 
         task_reg = self._make_task_reg(["code_sql"], tmp_path)
-        task_reg.get_task("code_sql").preferred_adapters = ["sql-lora"]  # already linked
+        task_reg.get_task("code_sql").preferred_adapters = ["sql-lora"]
         adapter = AdapterEntry(id="sql-lora", name="SQL", base_model="x", task_tags=["sql"])
 
         linked = _auto_link_adapter(adapter, task_reg)

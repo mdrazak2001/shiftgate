@@ -62,7 +62,7 @@ def _get_embedder():
     return Embedder()
 
 
-def _auto_link_adapter(adapter, task_reg) -> list[str]:
+def _auto_link_adapter(adapter: AdapterEntry, task_reg) -> list[str]:
     """Add ``adapter.id`` to the ``preferred_adapters`` of matching task clusters.
 
     A task cluster matches when at least one of the adapter's ``task_tags``
@@ -79,12 +79,38 @@ def _auto_link_adapter(adapter, task_reg) -> list[str]:
 
     for task in task_reg.get_all_tasks():
         task_tokens = set(task.id.lower().split("_"))
-        if adapter_tokens & task_tokens:  # non-empty intersection
+        if adapter_tokens & task_tokens:
             if adapter.id not in task.preferred_adapters:
                 task.preferred_adapters.append(adapter.id)
                 linked.append(task.id)
 
     return linked
+
+
+def _finish_adapter_add(adapter: AdapterEntry, task_reg, adapter_reg) -> None:
+    """Save registries, print confirmation, and auto-link the adapter to tasks."""
+    adapter_reg.save()
+    console.print(f"[green]✓[/green]  Adapter '[bold magenta]{adapter.id}[/bold magenta]' registered.")
+    console.print(f"   Name:       {adapter.name}")
+    console.print(f"   Base model: {adapter.base_model}")
+    if adapter.task_tags:
+        console.print(f"   Tags:       {', '.join(adapter.task_tags)}")
+    if adapter.hf_repo:
+        console.print(f"   HF repo:    {adapter.hf_repo}")
+    if adapter.local_path:
+        console.print(f"   Local path: {adapter.local_path}")
+    if adapter.runtime_name:
+        console.print(f"   Runtime:    {adapter.runtime_name}")
+
+    linked = _auto_link_adapter(adapter, task_reg)
+    if linked:
+        task_reg.save()
+        console.print(f"   [dim]Linked to task cluster(s): {', '.join(linked)}[/dim]")
+    else:
+        console.print(
+            "   [dim]No task clusters auto-linked (no tag overlap). "
+            "Use `shiftgate task list` to see clusters.[/dim]"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -96,7 +122,7 @@ def init() -> None:
     """Set up ~/.shiftgate/, compute task embeddings, and show a welcome message."""
     from shiftgate.registry.adapter_registry import AdapterRegistry
     from shiftgate.registry.task_registry import TaskRegistry
-    from shiftgate.utils.display import show_adapter_table, show_task_table, show_welcome_banner
+    from shiftgate.utils.display import show_task_table, show_welcome_banner
 
     show_welcome_banner()
 
@@ -105,12 +131,9 @@ def init() -> None:
     console.print(f"[dim]Config directory:[/dim] {shiftgate_dir}")
     console.print()
 
-    # Load defaults (copies them into the user's ~/.shiftgate/ on first save)
     console.print("[cyan]Loading task registry…[/cyan]")
     task_reg = TaskRegistry.load()
-    adapter_reg = AdapterRegistry.load()
 
-    # Compute embeddings (downloads model on first run)
     if task_reg.embeddings_ready():
         console.print("[dim]Embeddings already computed. Skipping (delete embeddings_cache.npy to force refresh).[/dim]")
     else:
@@ -119,23 +142,22 @@ def init() -> None:
         task_reg.compute_embeddings(embedder)
         console.print("[green]✓[/green]  Embeddings computed.")
 
-    # Persist to ~/.shiftgate/
     task_reg.save()
-    adapter_reg.save()
-    console.print(f"[green]✓[/green]  Registry saved to {shiftgate_dir}")
+    console.print(f"[green]✓[/green]  Task registry saved to {shiftgate_dir}")
     console.print()
 
     show_task_table(task_reg.get_all_tasks())
     console.print()
-    show_adapter_table(adapter_reg.list_adapters())
-    console.print()
 
     console.print(
         "[bold green]shiftgate is ready![/bold green]\n\n"
-        "  Try it:\n"
-        '    [cyan]shiftgate route "write a python function"[/cyan]\n\n'
-        "  Add a LoRA adapter:\n"
-        "    [cyan]shiftgate adapter add monology/pmc-llama-13b-lora[/cyan]\n"
+        "  Add your first adapter:\n"
+        '    [cyan]shiftgate adapter add teknium/sql-lora --tags sql --base llama3[/cyan]\n'
+        '    [cyan]shiftgate adapter add my-lora --local /path/to/adapter --tags code[/cyan]\n'
+        '    [cyan]shiftgate adapter add my-lora --runtime my-lora-vllm --tags code[/cyan]\n\n'
+        "  Then route a query:\n"
+        '    [cyan]shiftgate route "write a SQL query"[/cyan]\n'
+        '    [cyan]shiftgate route "write a SQL query" --explain[/cyan]\n'
     )
 
 
@@ -145,57 +167,125 @@ def init() -> None:
 
 @adapter_app.command("add")
 def adapter_add(
-    hf_repo_or_path: Annotated[str, typer.Argument(help="HuggingFace repo ID or local path.")],
+    identifier: Annotated[
+        str,
+        typer.Argument(
+            help=(
+                "One of: (A) a HuggingFace repo ID (contains '/'), "
+                "(B) an adapter slug for a local path (use with --local), "
+                "or (C) an adapter slug for a runtime-registered adapter (use with --runtime)."
+            )
+        ),
+    ],
     tags: Annotated[
         Optional[list[str]],
-        typer.Option("--tags", "-t", help="Task tags, e.g. --tags code python"),
+        typer.Option("--tags", "-t", help="Task tags, e.g. --tags sql --tags code"),
     ] = None,
     base: Annotated[
         Optional[str],
-        typer.Option("--base", "-b", help="Base model name, e.g. 'meta-llama/Meta-Llama-3-8B'"),
+        typer.Option("--base", "-b", help="Base model identifier, e.g. 'meta-llama/Meta-Llama-3-8B'"),
     ] = None,
     name: Annotated[Optional[str], typer.Option(help="Override display name.")] = None,
     description: Annotated[Optional[str], typer.Option(help="Short description.")] = None,
+    local: Annotated[
+        Optional[str],
+        typer.Option(
+            "--local",
+            help="(Mode B) Absolute or relative path to the adapter directory or .safetensors file.",
+        ),
+    ] = None,
+    runtime: Annotated[
+        Optional[str],
+        typer.Option(
+            "--runtime",
+            help=(
+                "(Mode C) The name the adapter is already registered under in the "
+                "running backend (vLLM --lora-modules name, or Ollama model name)."
+            ),
+        ),
+    ] = None,
+    adapter_id: Annotated[
+        Optional[str],
+        typer.Option("--id", help="Override the auto-derived registry ID slug."),
+    ] = None,
+    benchmark_score: Annotated[
+        Optional[float],
+        typer.Option("--score", help="Optional quality score between 0 and 1."),
+    ] = None,
 ) -> None:
-    """Register a new LoRA adapter from a HuggingFace repo or local path."""
+    """Register a LoRA adapter with shiftgate (metadata only — no weights are downloaded).
+
+    \b
+    Three registration modes:
+
+      A) HuggingFace repo  (identifier contains '/')
+         shiftgate adapter add teknium/sql-lora --tags sql --base llama3
+
+      B) Local adapter path  (use --local)
+         shiftgate adapter add sql-lora --local /models/sql-lora --tags sql --base llama3
+
+      C) Runtime-registered adapter  (use --runtime)
+         shiftgate adapter add sql-lora --runtime sql-lora-vllm --tags sql --base llama3
+    """
+    from shiftgate.registry.adapter_registry import (
+        AdapterRegistry,
+        adapter_from_hf,
+        adapter_from_local,
+        adapter_from_runtime,
+    )
+
     task_reg, adapter_reg = _load_registries()
 
-    kwargs: dict = {}
-    if tags:
-        kwargs["tags"] = tags
-    if base:
-        kwargs["base_model"] = base
-    if description:
-        kwargs["description"] = description
+    # Validate: --local and --runtime are mutually exclusive.
+    if local and runtime:
+        console.print("[red]Error:[/red] --local and --runtime are mutually exclusive.")
+        raise typer.Exit(1)
 
-    with console.status("[cyan]Fetching adapter metadata…[/cyan]"):
-        adapter = adapter_reg.add_adapter(hf_repo_or_path, **kwargs)
-
+    shared_kwargs: dict = {
+        "tags": list(tags) if tags else [],
+        "base_model": base or "unknown",
+        "description": description,
+        "benchmark_score": benchmark_score,
+    }
     if name:
-        adapter.name = name
-        adapter_reg._adapters[adapter.id] = adapter  # refresh
+        shared_kwargs["name"] = name
 
-    adapter_reg.save()
-    console.print(f"[green]✓[/green]  Adapter '[bold magenta]{adapter.id}[/bold magenta]' registered.")
-    console.print(f"   Name: {adapter.name}")
-    console.print(f"   Base: {adapter.base_model}")
-    if adapter.task_tags:
-        console.print(f"   Tags: {', '.join(adapter.task_tags)}")
-
-    # Auto-link: add this adapter to the preferred_adapters list of every
-    # task cluster whose ID tokens overlap with the adapter's tags.
-    # e.g. tags=["sql","code"] links to "code_sql", "code_python", etc.
-    linked = _auto_link_adapter(adapter, task_reg)
-    if linked:
-        task_reg.save()
-        console.print(
-            f"   [dim]Linked to task cluster(s): {', '.join(linked)}[/dim]"
+    # --- Mode B: local path ---
+    if local:
+        adapter = adapter_from_local(
+            local_path=local,
+            adapter_id=adapter_id or identifier,
+            **shared_kwargs,
         )
+
+    # --- Mode C: runtime name ---
+    elif runtime:
+        adapter = adapter_from_runtime(
+            runtime_name=runtime,
+            adapter_id=adapter_id or identifier,
+            **shared_kwargs,
+        )
+
+    # --- Mode A: HuggingFace repo (identifier contains '/') ---
+    elif "/" in identifier:
+        with console.status("[cyan]Reading HuggingFace card metadata (no weights downloaded)…[/cyan]"):
+            adapter = adapter_from_hf(
+                hf_repo=identifier,
+                adapter_id=adapter_id,
+                **shared_kwargs,
+            )
+
+    # --- Ambiguous: no '/', no --local, no --runtime ---
     else:
         console.print(
-            "   [dim]No matching task clusters found for these tags. "
-            "Use `shiftgate task list` to see available clusters.[/dim]"
+            f"[red]Error:[/red] '{identifier}' doesn't look like a HuggingFace repo ID (missing '/').\n"
+            "  Use [cyan]--local /path/to/adapter[/cyan] to register a local adapter, or\n"
+            "  use [cyan]--runtime <backend-name>[/cyan] for a runtime-registered adapter."
         )
+        raise typer.Exit(1)
+
+    adapter_reg.add_adapter(adapter)
+    _finish_adapter_add(adapter, task_reg, adapter_reg)
 
 
 @adapter_app.command("list")
@@ -269,7 +359,6 @@ def task_add() -> None:
     )
 
     if Confirm.ask(f"\nSave task '[bold]{task_id}[/bold]'?"):
-        # Recompute centroid for the new task only.
         try:
             embedder = _get_embedder()
             import numpy as np
@@ -298,13 +387,20 @@ def task_add() -> None:
 def route(
     query: Annotated[str, typer.Argument(help="Query to route.")],
     top_k: Annotated[int, typer.Option("--top-k", "-k", help="Number of candidate tasks.")] = 3,
+    explain: Annotated[
+        bool,
+        typer.Option("--explain", "-e", help="Show full routing decision tree."),
+    ] = False,
     record: Annotated[bool, typer.Option(help="Save trace to ~/.shiftgate/traces.jsonl.")] = True,
 ) -> None:
-    """Route a query to the best adapter (no inference — just the routing decision)."""
+    """Route a query to the best adapter (no inference — just the routing decision).
+
+    Use --explain to see the full decision tree: top task matches, similarity
+    scores, candidate adapters, and the reason the selected adapter was chosen.
+    """
     from shiftgate.feedback import loop as feedback_loop
-    from shiftgate.registry.task_registry import TaskRegistry
     from shiftgate.router import router as routing
-    from shiftgate.utils.display import show_routing_decision
+    from shiftgate.utils.display import show_explain_decision, show_routing_decision
 
     task_reg, adapter_reg = _load_registries()
 
@@ -315,7 +411,7 @@ def route(
     embedder = _get_embedder()
 
     try:
-        trace = routing.route(query, task_reg, adapter_reg, embedder, top_k=top_k)
+        trace, match_result = routing.route(query, task_reg, adapter_reg, embedder, top_k=top_k)
     except Exception as exc:
         console.print(f"[red]Routing error:[/red] {exc}")
         raise typer.Exit(1)
@@ -330,9 +426,15 @@ def route(
         backend_name=None,
     )
 
+    if explain:
+        show_explain_decision(trace, match_result)
+
     if record:
         feedback_loop.record_trace(trace)
-        console.print(f"[dim]Trace {trace.id[:8]}… recorded. Run `shiftgate feedback accept/reject` to rate it.[/dim]")
+        console.print(
+            f"[dim]Trace {trace.id[:8]}… recorded. "
+            "Run `shiftgate feedback accept/reject` to rate it.[/dim]"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -359,7 +461,7 @@ def run(
     embedder = _get_embedder()
 
     try:
-        trace = routing.route(query, task_reg, adapter_reg, embedder, top_k=top_k)
+        trace, match_result = routing.route(query, task_reg, adapter_reg, embedder, top_k=top_k)
     except Exception as exc:
         console.print(f"[red]Routing error:[/red] {exc}")
         raise typer.Exit(1)
@@ -384,15 +486,15 @@ def run(
         console.print(
             "[yellow]No inference backend detected.[/yellow]\n"
             "  shiftgate routed your query to "
-            f"[bold magenta]{trace.selected_adapter_id}[/bold magenta].\n"
-            "  To run inference, start a backend:\n"
+            f"[bold magenta]{trace.selected_adapter_id}[/bold magenta].\n\n"
+            "  Shiftgate is a routing layer — start a backend to run inference:\n"
             "    [cyan]ollama serve[/cyan]\n"
-            "    [cyan]python -m vllm.entrypoints.openai.api_server --model <base_model>[/cyan]"
+            "    [cyan]python -m vllm.entrypoints.openai.api_server "
+            "--model <base_model> --enable-lora[/cyan]"
         )
         feedback_loop.record_trace(trace)
         raise typer.Exit(0)
 
-    # Run inference
     console.print(f"[cyan]Running via [bold]{backend_name}[/bold]…[/cyan]")
     t0 = time.monotonic()
     try:
@@ -544,10 +646,12 @@ def demo() -> None:
             time.sleep(0.4)
 
     console.print()
-    console.print("[bold green]Demo complete![/bold green]  shiftgate routes tasks at inference time — zero training required.")
     console.print(
-        "\n  Get started:\n"
+        "[bold green]Demo complete![/bold green]  "
+        "shiftgate routes tasks at inference time — zero training required.\n\n"
+        "  Shiftgate is a routing layer. You manage models and LoRA weights.\n\n"
+        "  Get started:\n"
         '    [cyan]shiftgate init[/cyan]\n'
-        '    [cyan]shiftgate adapter add <hf_repo>[/cyan]\n'
-        '    [cyan]shiftgate route "your query here"[/cyan]\n'
+        '    [cyan]shiftgate adapter add teknium/sql-lora --tags sql --base llama3[/cyan]\n'
+        '    [cyan]shiftgate route "your query here" --explain[/cyan]\n'
     )
