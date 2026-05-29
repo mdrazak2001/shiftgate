@@ -1,10 +1,10 @@
-<p align="center">
-  <img src="assets/demo.gif" alt="shiftgate routing a query to the right LoRA adapter" width="720">
-</p>
-
 # shiftgate ⚡
 
 > **shiftgate is an intelligent routing layer that automatically selects the right LoRA adapter for each task in your local agent loop.**
+
+<p align="center">
+  <img src="assets/demo.gif" alt="shiftgate routing a query to the right LoRA adapter" width="720">
+</p>
 
 **Shiftgate is a routing layer. Users manage models and LoRA weights themselves.**  
 shiftgate stores only adapter *metadata* — it never downloads, caches, or manages weights.  
