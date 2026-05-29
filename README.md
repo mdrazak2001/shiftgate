@@ -8,15 +8,13 @@ Your inference backend (Ollama, vLLM) is responsible for loading the weights; sh
 
 Instead of hardcoding which adapter to use, shiftgate embeds your query and matches it against a catalog of task clusters using cosine similarity — then routes inference to the best-fit LoRA adapter on your running Ollama or vLLM instance.
 
-Inspired by the [LORAUTER paper](https://arxiv.org/abs/2406.08213) (EPFL, 2026).
-
 ---
 
 ## Quickstart
 
 ```bash
 # 1. Install (requires Python 3.10+, uv recommended)
-uv add shiftgate
+uv tool install shiftgate (or pip install shiftgate)
 
 # 2. Initialise: sets up ~/.shiftgate/ and computes task embeddings
 shiftgate init
@@ -93,24 +91,26 @@ User query
 
 ## Commands
 
-| Command | Description |
-|---|---|
-| `shiftgate init` | First-time setup: initialise `~/.shiftgate/`, compute task embeddings |
-| `shiftgate route "<query>"` | Route a query and show the decision — no inference |
-| `shiftgate route "<query>" --explain` | Full decision tree: task scores, candidates, selection reason |
-| `shiftgate run "<query>"` | Route + run via Ollama or vLLM |
-| `shiftgate adapter add <hf_repo> [--tags …] [--base …]` | Register adapter from HuggingFace (metadata only) |
-| `shiftgate adapter add <id> --local <path> [--tags …]` | Register a local adapter path |
-| `shiftgate adapter add <id> --runtime <name> [--tags …]` | Register a backend-loaded adapter by its runtime name |
-| `shiftgate adapter list` | Table of all registered adapters |
-| `shiftgate adapter remove <id>` | Remove an adapter |
-| `shiftgate task list` | Table of all task clusters |
-| `shiftgate task add` | Interactively add a new task cluster |
-| `shiftgate feedback accept` | Mark last routing as good |
-| `shiftgate feedback reject` | Mark last routing as bad |
-| `shiftgate feedback stats` | Adapter acceptance rate table |
-| `shiftgate status` | Backend connectivity + registry summary |
-| `shiftgate demo` | Animated demo with fake routing traces |
+
+| Command                                                  | Description                                                           |
+| -------------------------------------------------------- | --------------------------------------------------------------------- |
+| `shiftgate init`                                         | First-time setup: initialise `~/.shiftgate/`, compute task embeddings |
+| `shiftgate route "<query>"`                              | Route a query and show the decision — no inference                    |
+| `shiftgate route "<query>" --explain`                    | Full decision tree: task scores, candidates, selection reason         |
+| `shiftgate run "<query>"`                                | Route + run via Ollama or vLLM                                        |
+| `shiftgate adapter add <hf_repo> [--tags …] [--base …]`  | Register adapter from HuggingFace (metadata only)                     |
+| `shiftgate adapter add <id> --local <path> [--tags …]`   | Register a local adapter path                                         |
+| `shiftgate adapter add <id> --runtime <name> [--tags …]` | Register a backend-loaded adapter by its runtime name                 |
+| `shiftgate adapter list`                                 | Table of all registered adapters                                      |
+| `shiftgate adapter remove <id>`                          | Remove an adapter                                                     |
+| `shiftgate task list`                                    | Table of all task clusters                                            |
+| `shiftgate task add`                                     | Interactively add a new task cluster                                  |
+| `shiftgate feedback accept`                              | Mark last routing as good                                             |
+| `shiftgate feedback reject`                              | Mark last routing as bad                                              |
+| `shiftgate feedback stats`                               | Adapter acceptance rate table                                         |
+| `shiftgate status`                                       | Backend connectivity + registry summary                               |
+| `shiftgate demo`                                         | Animated demo with fake routing traces                                |
+
 
 ---
 
@@ -198,12 +198,14 @@ To add a task cluster that better matches your domain, edit `data/default_tasks.
 
 ## Roadmap
 
-| Version | Focus |
-|---|---|
-| **v0.1** | Single base model, multi-adapter routing ← _current_ |
-| v0.2 | Feedback loop + adapter scoring (auto-demote bad adapters) |
-| v0.3 | Multi-model routing (route to different base models per task) |
-| v1.0 | Community registry + web UI |
+
+| Version  | Focus                                                         |
+| -------- | ------------------------------------------------------------- |
+| **v0.1** | Single base model, multi-adapter routing ← *current*          |
+| v0.2     | Feedback loop + adapter scoring (auto-demote bad adapters)    |
+| v0.3     | Multi-model routing (route to different base models per task) |
+| v1.0     | Community registry + web UI                                   |
+
 
 ---
 
@@ -237,8 +239,8 @@ The recommended flow:
 1. Bump the version in `pyproject.toml` (`version = "x.y.z"`).
 2. Open a PR, get it reviewed and merged.
 3. Tag the commit: `git tag vx.y.z && git push origin vx.y.z`.
-4. The CI workflow builds the wheel with `uv build` and publishes to PyPI  
-   using [Trusted Publishing (OIDC)](https://docs.pypi.org/trusted-publishers/)  
+4. The CI workflow builds the wheel with `uv build` and publishes to PyPI
+  using [Trusted Publishing (OIDC)](https://docs.pypi.org/trusted-publishers/)  
    — no stored API token needed.
 
 For a one-off manual publish (maintainers only):
