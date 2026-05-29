@@ -6,36 +6,74 @@
   <img src="assets/demo.gif" alt="shiftgate routing a query to the right LoRA adapter" width="720">
 </p>
 
-**Shiftgate is a routing layer. Users manage models and LoRA weights themselves.**  
-shiftgate stores only adapter *metadata* — it never downloads, caches, or manages weights.  
-Your inference backend (Ollama, vLLM) is responsible for loading the weights; shiftgate tells it *which* adapter to use for each query.
+> **shiftgate does not manage weights.** It stores adapter *metadata* only — no downloading, caching, or loading LoRA files. You start **Ollama** or **vLLM** with your models and adapters loaded; shiftgate embeds each query, picks the best task cluster, and tells the backend which adapter to use.
 
-Instead of hardcoding which adapter to use, shiftgate embeds your query and matches it against a catalog of task clusters using cosine similarity — then routes inference to the best-fit LoRA adapter on your running Ollama or vLLM instance.
+> **`shiftgate run` requires a running inference backend.** Routing-only commands (`shiftgate route`, `shiftgate init`) work without one. To generate text, Ollama (`localhost:11434`) or vLLM (`localhost:8000`) must already be running with your adapters loaded.
+
+Instead of hardcoding which adapter to use, shiftgate matches your query against a catalog of task clusters using cosine similarity — then routes to the best-fit LoRA adapter on that backend.
 
 ---
 
 ## Quickstart
 
-Requires **Python 3.10+**.
+Requires **Python 3.10+** and a running **Ollama** or **vLLM** instance for inference.
+
+### 1. Install
 
 ```bash
-# Install
 uv tool install shiftgate
 # or: pip install shiftgate
+```
 
-# First-time setup — creates ~/.shiftgate/ and computes task embeddings
+### 2. Start your backend
+
+**vLLM** (example — load adapters with `--lora-modules`):
+
+```bash
+python -m vllm.entrypoints.openai.api_server \
+    --model meta-llama/Meta-Llama-3-8B \
+    --enable-lora \
+    --lora-modules python-lora=/path/to/python-lora
+```
+
+**Ollama** (example — create a model that bundles base + adapter, then serve):
+
+```bash
+ollama create python-lora-ollama -f my-python-lora.Modelfile
+ollama serve
+```
+
+### 3. Initialise shiftgate
+
+Creates `~/.shiftgate/` and computes task embeddings (one-time model download for routing):
+
+```bash
 shiftgate init
+```
 
-# Register an adapter (pick the mode that matches your setup)
-shiftgate adapter add teknium/sql-lora --tags sql --base llama3          # HuggingFace metadata
-shiftgate adapter add sql-lora --local /models/sql-lora --tags sql --base llama3   # local path
-shiftgate adapter add sql-lora --runtime sql-lora-vllm --tags sql --base llama3    # backend-loaded
+### 4. Register adapters
 
-# Route a query (decision only — no inference)
-shiftgate route "write a SQL query to find duplicate rows"
+Pick the option that matches your setup (see [Bring Your Own Models](#bring-your-own-models) for details):
 
-# Route + run (requires Ollama or vLLM running locally)
-shiftgate run "write a SQL query to find duplicate rows"
+```bash
+# Option 1 — adapter already loaded in vLLM
+shiftgate adapter add python-lora --runtime python-lora --tags python --base meta-llama/Meta-Llama-3-8B
+
+# Option 2 — adapter already loaded in Ollama
+shiftgate adapter add python-lora --runtime python-lora-ollama --tags python --base llama3
+
+# Option 3 — metadata-only (catalogue a HuggingFace repo; no weights downloaded)
+shiftgate adapter add teknium/python-lora --tags python --base llama3
+```
+
+### 5. Run a query
+
+```bash
+# Route only — shows the decision, no inference
+shiftgate route "write a python sorting function"
+
+# Route + run through your backend
+shiftgate run "write a python sorting function"
 ```
 
 **Essential commands:** `init` · `adapter add` · `route` · `run` · `doctor`
@@ -51,12 +89,12 @@ shiftgate run "write a python sorting function"
 ```
 ╭────────────────────────── Routing Decision ──────────────────────────╮
 │  Query          "write a python sorting function"                    │
-│  Matched Task   Python Code Generation  ████████████████░░  91.2%  │
-│  Adapter        python-lora-llama3  [meta-llama/Meta-Llama-3-8B]   │
-│  Backend        ollama                                               │
+│  Matched Task   Python Code Generation  ████████████████░░  91.2%    │
+│  Adapter        python-lora  [meta-llama/Meta-Llama-3-8B]            │
+│  Backend        vllm                                                 │
 ╰──────────────────────────────────────────────────────────────────────╯
 
-Running via ollama…
+Running via vllm…
 
 ────────────────────────────────── Response ──────────────────────────────────
 def sort_array(arr):
@@ -88,16 +126,16 @@ shiftgate doctor
 | **Adapter runtime availability** | For each registered adapter: linked status and whether it is **loaded** in the backend |
 | **Unlinked task clusters** | Task clusters with no adapter wired — routing will match the task but cannot run inference |
 
-**Runtime adapter verification** happens automatically when you register a backend-loaded adapter:
+**Runtime adapter verification** runs automatically when you register a backend-loaded adapter:
 
 ```bash
-shiftgate adapter add sql-lora --runtime sql-lora-vllm --tags sql --base llama3
+shiftgate adapter add python-lora --runtime python-lora --tags python --base llama3
 #   Backend: vllm ✓ verified        ← adapter found in the running backend
-#   Backend: vllm ⚠ runtime 'sql-lora-vllm' not loaded — did you pass --lora-modules?
+#   Backend: vllm ⚠ runtime 'python-lora' not loaded — did you pass --lora-modules?
 #   Backend: not running (verification skipped)
 ```
 
-**Backend detection** is automatic at runtime. `shiftgate run`, `shiftgate status`, and `shiftgate doctor` probe Ollama first, then vLLM. No config file required.
+**Backend detection** is automatic. `shiftgate run`, `shiftgate status`, and `shiftgate doctor` probe Ollama first, then vLLM. No config file required.
 
 ---
 
@@ -124,8 +162,8 @@ User query
            │                       │
            ▼                       ▼
 ┌─────────────────┐   ┌────────────────────────────┐
-│  Task Registry  │   │     Adapter Registry        │
-│  ~/.shiftgate/  │   │  ~/.shiftgate/adapters.json │
+│  Task Registry  │   │     Adapter Registry       │
+│  ~/.shiftgate/  │   │  ~/.shiftgate/adapters.json│
 │  tasks.json     │   │                            │
 │  (10 defaults)  │   │  Add via:                  │
 └─────────────────┘   │  shiftgate adapter add     │
@@ -135,8 +173,8 @@ User query
               ┌────────────────────────────────┐
               │        BackendRouter           │
               │                                │
-              │  Ollama  (localhost:11434)      │
-              │  vLLM    (localhost:8000)       │
+              │  Ollama  (localhost:11434)     │
+              │  vLLM    (localhost:8000)      │
               │  Auto-detected at runtime      │
               └────────────────────────────────┘
                                    │
@@ -153,10 +191,30 @@ User query
 
 ## Bring Your Own Models
 
-Shiftgate is a routing layer. It stores adapter metadata only.  
-**You are responsible for loading weights into your inference backend before running `shiftgate run`.**
+shiftgate is a routing layer. **You load weights into Ollama or vLLM first**, then register what you loaded so shiftgate can route to it.
 
-### Using with Ollama (Mode B or C)
+You can also catalogue adapters you have not loaded yet (Option 3) — useful for `shiftgate route`, but `shiftgate run` will not produce output until the adapter is available in a running backend.
+
+### Option 1 — Adapter already loaded in vLLM
+
+Start vLLM with your adapters:
+
+```bash
+python -m vllm.entrypoints.openai.api_server \
+    --model meta-llama/Meta-Llama-3-8B \
+    --enable-lora \
+    --lora-modules sql-lora=/path/to/sql-lora
+```
+
+Register using the `--lora-modules` key as `--runtime`:
+
+```bash
+shiftgate adapter add sql-lora --runtime sql-lora --tags sql --base meta-llama/Meta-Llama-3-8B
+```
+
+shiftgate sends `"model": "<runtime_name>"` in each `/v1/chat/completions` request.
+
+### Option 2 — Adapter already loaded in Ollama
 
 Create a Modelfile that bundles your base model and adapter:
 
@@ -171,43 +229,29 @@ ollama create sql-lora-ollama -f my-sql-lora.Modelfile
 ollama serve
 ```
 
-Register in shiftgate using the Ollama model name as `--runtime`:
+Register using the Ollama model name as `--runtime`:
 
 ```bash
-# Mode C — backend already has the adapter loaded
 shiftgate adapter add sql-lora --runtime sql-lora-ollama --tags sql --base llama3
 ```
 
 shiftgate passes `runtime_name` (or falls back to `id`) as the Ollama model name.
 
-### Using with vLLM (Mode B or C)
+### Option 3 — Metadata-only registration
 
-Load adapters at server start with `--lora-modules`:
-
-```bash
-python -m vllm.entrypoints.openai.api_server \
-    --model meta-llama/Meta-Llama-3-8B \
-    --enable-lora \
-    --lora-modules sql-lora=/path/to/sql-lora
-```
-
-Register in shiftgate:
+Catalogue an adapter without downloading weights — metadata only:
 
 ```bash
-# Mode C — adapter name matches the --lora-modules key
-shiftgate adapter add sql-lora --runtime sql-lora --tags sql --base meta-llama/Meta-Llama-3-8B
-```
-
-shiftgate sends `"model": "<runtime_name>"` in each `/v1/chat/completions` request.
-
-### Registering a HuggingFace adapter (Mode A)
-
-```bash
-# Metadata only — no weights downloaded
 shiftgate adapter add teknium/sql-lora --tags sql --base llama3
 ```
 
-This is useful for cataloguing adapters before you have pulled their weights.
+You can also record a local path for your own reference (shiftgate still does not load the file):
+
+```bash
+shiftgate adapter add sql-lora --local /models/sql-lora --tags sql --base llama3
+```
+
+Useful for exploring routing decisions before your backend is set up. To run inference, load the adapter in vLLM or Ollama and re-register with `--runtime`.
 
 ---
 
