@@ -15,7 +15,7 @@ from shiftgate.registry.adapter_registry import AdapterRegistry
 from shiftgate.registry.schemas import RoutingTrace
 from shiftgate.registry.task_registry import TaskRegistry
 from shiftgate.router.embedder import Embedder
-from shiftgate.router.matcher import MatchResult, NoAdapterError, select_adapter, top_k_tasks
+from shiftgate.router.matcher import MatchResult, select_adapter, top_k_tasks
 
 logger = logging.getLogger(__name__)
 
@@ -54,10 +54,14 @@ def route(
     ``(RoutingTrace, MatchResult)`` — the trace for persistence/feedback and
     the full match result for detailed display (e.g. ``--explain``).
 
+    Note
+    ----
+    When the matched task has no linked adapter, ``MatchResult.selected_adapter``
+    is ``None`` and the trace's ``selected_adapter_id`` is ``None``.  The router
+    never substitutes an arbitrary adapter.
+
     Raises
     ------
-    NoAdapterError
-        If no registered adapter matches any of the top-K tasks.
     ValueError
         If embeddings have not been computed (missing centroids).
     """
@@ -71,12 +75,14 @@ def route(
     ranked = top_k_tasks(query_embedding, all_tasks, k=top_k)
     result = select_adapter(ranked, adapter_registry)
 
+    selected_id = result.selected_adapter.id if result.selected_adapter else None
+
     trace = RoutingTrace(
         id=uuid.uuid4().hex,
         query=query,
         matched_task_id=result.matched_task.id,
         similarity_score=result.similarity_score,
-        selected_adapter_id=result.selected_adapter.id,
+        selected_adapter_id=selected_id,
         timestamp=datetime.now(timezone.utc).isoformat(),
     )
 
@@ -85,7 +91,7 @@ def route(
         query[:60],
         result.matched_task.id,
         result.similarity_score * 100,
-        result.selected_adapter.id,
+        selected_id or "<none>",
         result.selection_method,
     )
     return trace, result

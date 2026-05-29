@@ -83,7 +83,10 @@ def show_routing_decision(
     backend_name:
         Active backend name ('ollama', 'vllm', or None).
     """
-    colour = _similarity_colour(trace.similarity_score)
+    # When no adapter was selected the decision is unactionable — render red
+    # regardless of how confident the task match was.
+    no_adapter = adapter is None and trace.selected_adapter_id is None
+    colour = "red" if no_adapter else _similarity_colour(trace.similarity_score)
 
     grid = Table.grid(padding=(0, 2))
     grid.add_column(style="dim", min_width=16)
@@ -98,7 +101,18 @@ def show_routing_decision(
     task_text.append_text(_similarity_bar(trace.similarity_score))
     grid.add_row("Matched Task", task_text)
 
-    if adapter:
+    if no_adapter:
+        # Never silently substitute an adapter. Tell the user how to fix it.
+        adapter_text = Text("No adapter available", style="bold red")
+        grid.add_row("Adapter", adapter_text)
+        suggestion = Text()
+        suggestion.append("Add one with: ", style="dim")
+        suggestion.append(
+            f"shiftgate adapter add <hf_repo> --tags {trace.matched_task_id}",
+            style="cyan",
+        )
+        grid.add_row("Suggestion", suggestion)
+    elif adapter:
         adapter_text = Text()
         adapter_text.append(adapter.name, style="bold magenta")
         adapter_text.append(f"  [{adapter.base_model}]", style="dim")
@@ -107,7 +121,7 @@ def show_routing_decision(
             adapter_text.append(f"\n  {source}", style="dim blue")
         grid.add_row("Adapter", adapter_text)
     else:
-        grid.add_row("Adapter", Text(trace.selected_adapter_id, style="bold magenta"))
+        grid.add_row("Adapter", Text(str(trace.selected_adapter_id), style="bold magenta"))
 
     backend_text = Text(backend_name or "—", style="green" if backend_name else "dim")
     grid.add_row("Backend", backend_text)
@@ -115,12 +129,12 @@ def show_routing_decision(
     if trace.latency_ms is not None:
         grid.add_row("Latency", Text(f"{trace.latency_ms:.0f} ms", style="dim"))
 
-    panel = Panel(
-        grid,
-        title=f"[bold {colour}] shiftgate routing decision [/bold {colour}]",
-        border_style=colour,
-        expand=False,
+    title = (
+        "[bold red] no adapter available [/bold red]"
+        if no_adapter
+        else f"[bold {colour}] shiftgate routing decision [/bold {colour}]"
     )
+    panel = Panel(grid, title=title, border_style=colour, expand=False)
     console.print()
     console.print(panel)
     console.print()
@@ -192,15 +206,23 @@ def show_explain_decision(
     method_labels = {
         "preferred": "[green]preferred_adapters list[/green]",
         "fallback": "[yellow]fallback_adapters list[/yellow]",
-        "tag_overlap": "[yellow]tag-overlap fallback[/yellow] (adapter not in any task list yet — run `shiftgate adapter add` with matching tags)",
+        "no_adapter_for_task": "[red]no adapter linked to the matched task[/red]",
     }
     method_display = method_labels.get(match_result.selection_method, match_result.selection_method)
 
     selected = match_result.selected_adapter
-    console.print(f"  [bold]Selected adapter:[/bold]  [bold magenta]{selected.id}[/bold magenta]")
-    console.print(f"  [bold]Base model:[/bold]        {selected.base_model}")
-    console.print(f"  [bold]Source:[/bold]            {_adapter_source_label(selected)}")
-    console.print(f"  [bold]Selection method:[/bold]  {method_display}")
+    if selected is None:
+        console.print("  [bold]Selected adapter:[/bold]  [bold red]No adapter available[/bold red]")
+        console.print(f"  [bold]Selection method:[/bold]  {method_display}")
+        console.print(
+            "  [dim]Add one with:[/dim]  "
+            f"[cyan]shiftgate adapter add <hf_repo> --tags {match_result.matched_task.id}[/cyan]"
+        )
+    else:
+        console.print(f"  [bold]Selected adapter:[/bold]  [bold magenta]{selected.id}[/bold magenta]")
+        console.print(f"  [bold]Base model:[/bold]        {selected.base_model}")
+        console.print(f"  [bold]Source:[/bold]            {_adapter_source_label(selected)}")
+        console.print(f"  [bold]Selection method:[/bold]  {method_display}")
     console.print()
     console.rule()
     console.print()
@@ -233,13 +255,18 @@ def show_adapter_table(adapters: list[AdapterEntry]) -> None:
     table.add_column("Base Model", style="dim")
     table.add_column("Tags", style="green")
     table.add_column("Source", style="blue")
+    table.add_column("Status", justify="center")
     table.add_column("Score", justify="right")
 
     for a in adapters:
         source = _adapter_source_label(a)
         score = f"{a.benchmark_score:.2f}" if a.benchmark_score is not None else "—"
         tags = ", ".join(a.task_tags) if a.task_tags else "—"
-        table.add_row(a.id, a.name, a.base_model, tags, source, score)
+        if a.status == "linked":
+            status = "[green]linked[/green]"
+        else:
+            status = "[yellow]unassigned[/yellow]"
+        table.add_row(a.id, a.name, a.base_model, tags, source, status, score)
 
     console.print(table)
 

@@ -104,11 +104,15 @@ def _finish_adapter_add(adapter: AdapterEntry, task_reg, adapter_reg) -> None:
 
     linked = _auto_link_adapter(adapter, task_reg)
     if linked:
+        # Successfully wired into at least one task cluster → mark routable.
+        adapter.status = "linked"
+        adapter_reg.save()
         task_reg.save()
-        console.print(f"   [dim]Linked to task cluster(s): {', '.join(linked)}[/dim]")
+        console.print(f"   [green]Status:     linked[/green] → {', '.join(linked)}")
     else:
         console.print(
-            "   [dim]No task clusters auto-linked (no tag overlap). "
+            "   [yellow]Status:     unassigned[/yellow] — no task clusters matched these tags.\n"
+            "   [dim]This adapter will NOT be selected by the router until it is linked. "
             "Use `shiftgate task list` to see clusters.[/dim]"
         )
 
@@ -479,7 +483,15 @@ def run(
     )
 
     if adapter is None:
-        console.print(f"[red]Adapter '{trace.selected_adapter_id}' not found in registry.[/red]")
+        # Either the matched task has no linked adapter, or the linked ID is
+        # missing from the registry. In both cases: never guess, never run.
+        console.print(
+            "[red]No adapter available for this query — not running inference.[/red]\n"
+            f"  Matched task: [bold]{trace.matched_task_id}[/bold]\n"
+            "  Add one with: "
+            f"[cyan]shiftgate adapter add <hf_repo> --tags {trace.matched_task_id}[/cyan]"
+        )
+        feedback_loop.record_trace(trace)
         raise typer.Exit(1)
 
     if backend_name is None:

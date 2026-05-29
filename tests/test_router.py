@@ -172,17 +172,26 @@ class TestSelectAdapter:
         result = select_adapter(ranked, adapter_reg_partial)
         assert result.selected_adapter.id in {"adapter-y", "adapter-z"}
 
-    def test_raises_no_adapter_error_when_registry_empty(self, synthetic_tasks, tmp_path):
+    def test_no_adapter_when_registry_empty(self, synthetic_tasks, tmp_path):
+        """An empty registry yields a None adapter, never an exception or a guess."""
         empty_reg = AdapterRegistry(adapters=[], source_path=tmp_path / "adapters.json")
         query_emb = np.array([1.0, 0.0, 0.0], dtype=np.float32)
         ranked = top_k_tasks(query_emb, synthetic_tasks, k=3)
-        with pytest.raises(NoAdapterError):
-            select_adapter(ranked, empty_reg)
+        result = select_adapter(ranked, empty_reg)
+        assert result.selected_adapter is None
+        assert result.has_adapter is False
+        assert result.selection_method == "no_adapter_for_task"
+        # The matched task is still reported so the caller can prompt the user.
+        assert result.matched_task.id == "task_x"
 
-    def test_tag_overlap_fallback_when_preferred_lists_empty(self, tmp_path):
-        """If preferred_adapters is empty for all tasks, adapter tags are used as fallback."""
-        task_sql = _make_task("code_sql", [0, 1, 0], adapter_ids=[])
-        task_py  = _make_task("code_python", [1, 0, 0], adapter_ids=[])
+    def test_no_silent_fallback_when_task_has_no_linked_adapter(self, tmp_path):
+        """The bug fix: an unrelated adapter must NOT be picked for the matched task.
+
+        A music-style query matches a task that has no linked adapter; even
+        though a sql-lora exists in the registry, it must not be selected.
+        """
+        task_music = _make_task("audio_music", [0, 1, 0], adapter_ids=[])
+        task_py    = _make_task("code_python", [1, 0, 0], adapter_ids=[])
 
         sql_adapter = AdapterEntry(
             id="sql-lora",
@@ -192,25 +201,13 @@ class TestSelectAdapter:
         )
         reg = AdapterRegistry(adapters=[sql_adapter], source_path=tmp_path / "adapters.json")
 
-        query_emb = np.array([0.0, 1.0, 0.0], dtype=np.float32)
-        ranked = top_k_tasks(query_emb, [task_sql, task_py], k=2)
+        query_emb = np.array([0.0, 1.0, 0.0], dtype=np.float32)  # matches audio_music
+        ranked = top_k_tasks(query_emb, [task_music, task_py], k=2)
         result = select_adapter(ranked, reg)
 
-        assert result.selected_adapter.id == "sql-lora"
-        assert result.selection_method == "tag_overlap"
-
-    def test_tag_overlap_selects_best_matching_adapter(self, tmp_path):
-        task_sql = _make_task("code_sql", [0, 1, 0], adapter_ids=[])
-
-        sql_adapter = AdapterEntry(id="sql-lora", name="SQL", base_model="x", task_tags=["sql", "code"])
-        py_adapter  = AdapterEntry(id="py-lora",  name="Py",  base_model="x", task_tags=["python"])
-
-        reg = AdapterRegistry(adapters=[sql_adapter, py_adapter], source_path=tmp_path / "adapters.json")
-        query_emb = np.array([0.0, 1.0, 0.0], dtype=np.float32)
-        ranked = top_k_tasks(query_emb, [task_sql], k=1)
-        result = select_adapter(ranked, reg)
-
-        assert result.selected_adapter.id == "sql-lora"
+        assert result.selected_adapter is None
+        assert result.selection_method == "no_adapter_for_task"
+        assert result.matched_task.id == "audio_music"
 
     def test_fallback_adapters_are_tried(self, tmp_path):
         task_with_fallback = TaskCluster(

@@ -381,3 +381,68 @@ class TestAutoLinkAdapter:
 
         linked = _auto_link_adapter(adapter, task_reg)
         assert linked == []
+
+
+# ---------------------------------------------------------------------------
+# Adapter status field
+# ---------------------------------------------------------------------------
+
+class TestAdapterStatus:
+    def test_default_status_is_unassigned(self):
+        adapter = AdapterEntry(id="x", name="X", base_model="b")
+        assert adapter.status == "unassigned"
+
+    def test_status_persists_round_trip(self, tmp_shiftgate, monkeypatch):
+        import shiftgate.registry.adapter_registry as ar_mod
+
+        save_path = tmp_shiftgate / "adapters.json"
+        monkeypatch.setattr(ar_mod, "_USER_ADAPTERS_PATH", save_path)
+
+        adapter = AdapterEntry(
+            id="sql-lora", name="SQL", base_model="llama3",
+            task_tags=["sql"], hf_repo="org/sql-lora", status="linked",
+        )
+        AdapterRegistry(adapters=[adapter], source_path=save_path).save()
+
+        reloaded = AdapterRegistry.load().get_adapter("sql-lora")
+        assert reloaded.status == "linked"
+
+    def test_finish_adapter_add_marks_linked(self, tmp_shiftgate, monkeypatch):
+        """_finish_adapter_add should set status='linked' when a task is linked."""
+        import shiftgate.cli as cli_mod
+
+        # Quiet console output during the test.
+        monkeypatch.setattr(cli_mod.console, "print", lambda *a, **k: None)
+
+        task = TaskCluster(
+            id="code_sql", name="SQL", description="",
+            validation_examples=["x"], preferred_adapters=[],
+        )
+        task_reg = TaskRegistry(tasks=[task], source_path=tmp_shiftgate / "tasks.json")
+        adapter = AdapterEntry(
+            id="sql-lora", name="SQL", base_model="llama3",
+            task_tags=["sql"], hf_repo="org/sql-lora",
+        )
+        adapter_reg = AdapterRegistry(adapters=[adapter], source_path=tmp_shiftgate / "adapters.json")
+
+        cli_mod._finish_adapter_add(adapter, task_reg, adapter_reg)
+        assert adapter.status == "linked"
+
+    def test_finish_adapter_add_stays_unassigned_without_match(self, tmp_shiftgate, monkeypatch):
+        import shiftgate.cli as cli_mod
+
+        monkeypatch.setattr(cli_mod.console, "print", lambda *a, **k: None)
+
+        task = TaskCluster(
+            id="code_sql", name="SQL", description="",
+            validation_examples=["x"], preferred_adapters=[],
+        )
+        task_reg = TaskRegistry(tasks=[task], source_path=tmp_shiftgate / "tasks.json")
+        adapter = AdapterEntry(
+            id="music-lora", name="Music", base_model="llama3",
+            task_tags=["music"], hf_repo="org/music-lora",
+        )
+        adapter_reg = AdapterRegistry(adapters=[adapter], source_path=tmp_shiftgate / "adapters.json")
+
+        cli_mod._finish_adapter_add(adapter, task_reg, adapter_reg)
+        assert adapter.status == "unassigned"

@@ -15,6 +15,8 @@ weights available to the backend (Ollama, vLLM, etc.) before running inference.
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field, model_validator
 
 
@@ -79,6 +81,16 @@ class AdapterEntry(BaseModel):
     benchmark_score: float | None = Field(
         default=None,
         description="Optional benchmark score (0–1) reported by the adapter author.",
+    )
+
+    # --- routing wiring status ---
+    status: Literal["linked", "unassigned"] = Field(
+        default="unassigned",
+        description=(
+            "Whether this adapter is wired into at least one task cluster's "
+            "preferred_adapters list. 'linked' = reachable by the router; "
+            "'unassigned' = registered but not yet routable to any task."
+        ),
     )
 
     @model_validator(mode="after")
@@ -155,7 +167,13 @@ class RoutingTrace(BaseModel):
     similarity_score: float = Field(
         description="Cosine similarity between the query embedding and the winning centroid (0–1)."
     )
-    selected_adapter_id: str = Field(description="ID of the adapter that was selected for inference.")
+    selected_adapter_id: str | None = Field(
+        default=None,
+        description=(
+            "ID of the adapter selected for inference, or None when the matched "
+            "task has no linked adapter in the registry."
+        ),
+    )
     accepted: bool | None = Field(
         default=None,
         description="User feedback: True = good routing, False = bad routing, None = not yet rated.",

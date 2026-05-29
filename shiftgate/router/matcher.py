@@ -43,15 +43,24 @@ class MatchResult:
 
     Returned by ``select_adapter`` so that both the router and the
     ``--explain`` display have access to the complete decision tree.
+
+    ``selected_adapter`` is ``None`` when the matched task has no adapter
+    linked in the registry.  In that case ``selection_method`` is
+    ``"no_adapter_for_task"`` and the router must NOT run inference.
     """
 
-    selected_adapter: AdapterEntry
+    selected_adapter: AdapterEntry | None
     matched_task: TaskCluster
     similarity_score: float
     # All top-K task matches including their candidate adapter lists
     all_task_matches: list[TaskMatch] = field(default_factory=list)
-    # How the adapter was ultimately found: "preferred", "fallback", or "tag_overlap"
+    # How the adapter was found: "preferred", "fallback", or "no_adapter_for_task"
     selection_method: str = "preferred"
+
+    @property
+    def has_adapter(self) -> bool:
+        """True when an adapter was successfully selected."""
+        return self.selected_adapter is not None
 
 
 # ---------------------------------------------------------------------------
@@ -109,40 +118,38 @@ def select_adapter(
     top_tasks: list[TaskMatch],
     adapter_registry,  # AdapterRegistry — avoid circular import with string hint
 ) -> MatchResult:
-    """Select the best adapter given the ranked task list.
+    """Select the adapter linked to the best-matching task.
 
     Strategy
     --------
-    Pass 1 — explicit preferred/fallback lists
-        For each top task (highest score first), walk ``preferred_adapters``
-        then ``fallback_adapters``.  Return the first adapter found in the
-        registry.  Also populates ``TaskMatch.candidate_adapters`` for every
-        task so the ``--explain`` view can show all candidates.
+    For each top task (highest score first), walk ``preferred_adapters`` then
+    ``fallback_adapters`` and collect the adapters that exist in the registry
+    (populating ``TaskMatch.candidate_adapters`` for the ``--explain`` view).
+    The first such adapter found, on the highest-scoring task, is selected.
 
-    Pass 2 — tag-overlap fallback
-        If no task had a registered preferred/fallback adapter (e.g. the user
-        just added an adapter without re-linking), score every registered
-        adapter by how many of its ``task_tags`` appear as tokens in the top
-        task's ID (e.g. tag ``"sql"`` overlaps ``"code_sql"``).  Return the
-        highest-scoring adapter.  This means ``adapter add`` works immediately
-        without a separate linking step.
-
-    Pass 3 — empty registry
-        Raise ``NoAdapterError`` only when there are literally no adapters.
+    No silent fallback
+    ------------------
+    If the matched (top) task has **no** linked adapter in the registry, the
+    router must NOT substitute an arbitrary adapter — doing so silently routes,
+    e.g., a music query to a SQL adapter and destroys trust.  Instead this
+    returns a ``MatchResult`` with ``selected_adapter=None`` and
+    ``selection_method="no_adapter_for_task"``.
 
     Parameters
     ----------
     top_tasks:
-        Output of ``top_k_tasks``.
+        Output of ``top_k_tasks`` (sorted by score descending).
     adapter_registry:
         ``AdapterRegistry`` instance to look up adapter IDs.
 
     Returns
     -------
-    ``MatchResult`` containing the selected adapter, winning task, score, and
-    the full ranked task list annotated with their candidate adapters.
+    ``MatchResult``.  ``selected_adapter`` is ``None`` when no adapter is
+    linked to any of the ranked tasks.  The ``matched_task`` is always the
+    top-scoring task so callers can still report what was matched.
     """
-    # Pass 1: populate candidate lists and find the first explicit match.
+    # Populate candidate lists for every task (for the --explain view) and
+    # find the first explicit match in score order.
     explicit_result: MatchResult | None = None
 
     for tm in top_tasks:
@@ -178,40 +185,25 @@ def select_adapter(
         )
         return explicit_result
 
-    # Pass 2: tag-overlap fallback.
-    all_adapters = adapter_registry.list_adapters()
-    if not all_adapters:
-        raise NoAdapterError(
-            "No adapters registered. Add one with `shiftgate adapter add`."
-        )
-
+    # No adapter linked to any ranked task — do NOT guess. Report the matched
+    # task with no adapter so the caller can prompt the user to add one.
     top_task = top_tasks[0]
-    task_vocab: set[str] = set()
-    for tm in top_tasks:
-        task_vocab.update(tm.task.id.lower().split("_"))
-
-    best_adapter = max(
-        all_adapters,
-        key=lambda a: len({t.lower() for t in a.task_tags} & task_vocab),
-    )
-
-    # Add the fallback adapter as a candidate on the top task for the explain view.
-    if best_adapter not in top_task.candidate_adapters:
-        top_task.candidate_adapters.append(best_adapter)
-
-    logger.debug(
-        "Tag-overlap fallback selected adapter '%s' for task '%s'",
-        best_adapter.id,
+    logger.info(
+        "No linked adapter for matched task '%s' — refusing to guess.",
         top_task.task.id,
     )
     return MatchResult(
-        selected_adapter=best_adapter,
+        selected_adapter=None,
         matched_task=top_task.task,
         similarity_score=top_task.score,
         all_task_matches=top_tasks,
-        selection_method="tag_overlap",
+        selection_method="no_adapter_for_task",
     )
 
 
 class NoAdapterError(RuntimeError):
-    """Raised when the matcher cannot find any registered adapter for a query."""
+    """Raised when the matcher cannot find any registered adapter for a query.
+
+    Retained for backward compatibility; ``select_adapter`` no longer raises it
+    (it returns a ``MatchResult`` with ``selected_adapter=None`` instead).
+    """
