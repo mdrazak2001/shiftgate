@@ -216,3 +216,69 @@ class TestTaskRegistry:
         reg.add_task(updated)
         assert len(reg) == 1
         assert reg.get_task("test_task").name == "Updated Task"
+
+
+# ---------------------------------------------------------------------------
+# _auto_link_adapter helper tests
+# ---------------------------------------------------------------------------
+
+class TestAutoLinkAdapter:
+    """Tests for the cli._auto_link_adapter helper."""
+
+    def _make_task_reg(self, task_ids: list[str], tmp_path) -> TaskRegistry:
+        tasks = [
+            TaskCluster(
+                id=tid,
+                name=tid,
+                description="",
+                validation_examples=["example"],
+                preferred_adapters=[],
+            )
+            for tid in task_ids
+        ]
+        return TaskRegistry(tasks=tasks, source_path=tmp_path / "tasks.json")
+
+    def test_links_matching_task(self, tmp_path):
+        from shiftgate.cli import _auto_link_adapter
+
+        task_reg = self._make_task_reg(["code_sql", "code_python"], tmp_path)
+        adapter = AdapterEntry(id="sql-lora", name="SQL", base_model="x", task_tags=["sql"])
+
+        linked = _auto_link_adapter(adapter, task_reg)
+
+        assert "code_sql" in linked
+        assert "code_python" not in linked
+        assert "sql-lora" in task_reg.get_task("code_sql").preferred_adapters
+        assert "sql-lora" not in task_reg.get_task("code_python").preferred_adapters
+
+    def test_links_multiple_tasks(self, tmp_path):
+        from shiftgate.cli import _auto_link_adapter
+
+        task_reg = self._make_task_reg(["code_sql", "code_python", "text_summarize"], tmp_path)
+        adapter = AdapterEntry(id="code-lora", name="Code", base_model="x", task_tags=["code"])
+
+        linked = _auto_link_adapter(adapter, task_reg)
+
+        # "code" matches "code_sql" and "code_python" but not "text_summarize"
+        assert set(linked) == {"code_sql", "code_python"}
+
+    def test_no_duplicate_links(self, tmp_path):
+        from shiftgate.cli import _auto_link_adapter
+
+        task_reg = self._make_task_reg(["code_sql"], tmp_path)
+        task_reg.get_task("code_sql").preferred_adapters = ["sql-lora"]  # already linked
+        adapter = AdapterEntry(id="sql-lora", name="SQL", base_model="x", task_tags=["sql"])
+
+        linked = _auto_link_adapter(adapter, task_reg)
+
+        assert linked == []
+        assert task_reg.get_task("code_sql").preferred_adapters == ["sql-lora"]
+
+    def test_no_tags_returns_empty(self, tmp_path):
+        from shiftgate.cli import _auto_link_adapter
+
+        task_reg = self._make_task_reg(["code_sql"], tmp_path)
+        adapter = AdapterEntry(id="unlabelled", name="X", base_model="x", task_tags=[])
+
+        linked = _auto_link_adapter(adapter, task_reg)
+        assert linked == []

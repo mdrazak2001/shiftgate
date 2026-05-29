@@ -163,12 +163,49 @@ class TestSelectAdapter:
         # task_x has no matching adapter → falls through to task_y or task_z
         assert adapter.id in {"adapter-y", "adapter-z"}
 
-    def test_raises_no_adapter_error_when_nothing_matches(self, synthetic_tasks, tmp_path):
+    def test_raises_no_adapter_error_when_registry_empty(self, synthetic_tasks, tmp_path):
+        """NoAdapterError is raised only when the registry has zero adapters."""
         empty_reg = AdapterRegistry(adapters=[], source_path=tmp_path / "adapters.json")
         query_emb = np.array([1.0, 0.0, 0.0], dtype=np.float32)
         ranked = top_k_tasks(query_emb, synthetic_tasks, k=3)
         with pytest.raises(NoAdapterError):
             select_adapter(ranked, empty_reg)
+
+    def test_tag_overlap_fallback_when_preferred_lists_empty(self, tmp_path):
+        """If preferred_adapters is empty for all tasks, adapter tags are used as fallback."""
+        # Tasks have no preferred/fallback lists — mirrors the default_tasks.json situation.
+        task_sql = _make_task("code_sql", [0, 1, 0], adapter_ids=[])
+        task_py  = _make_task("code_python", [1, 0, 0], adapter_ids=[])
+
+        sql_adapter = AdapterEntry(
+            id="sql-lora",
+            name="SQL LoRA",
+            base_model="llama3",
+            task_tags=["sql", "code"],
+        )
+        reg = AdapterRegistry(adapters=[sql_adapter], source_path=tmp_path / "adapters.json")
+
+        # Query pointing at code_sql
+        query_emb = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+        ranked = top_k_tasks(query_emb, [task_sql, task_py], k=2)
+        adapter, task, score = select_adapter(ranked, reg)
+
+        assert adapter.id == "sql-lora"
+
+    def test_tag_overlap_selects_best_matching_adapter(self, tmp_path):
+        """When multiple adapters are registered, the one with most tag overlap wins."""
+        task_sql = _make_task("code_sql", [0, 1, 0], adapter_ids=[])
+
+        sql_adapter = AdapterEntry(id="sql-lora", name="SQL", base_model="x", task_tags=["sql", "code"])
+        py_adapter  = AdapterEntry(id="py-lora",  name="Py",  base_model="x", task_tags=["python"])
+
+        reg = AdapterRegistry(adapters=[sql_adapter, py_adapter], source_path=tmp_path / "adapters.json")
+        query_emb = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+        ranked = top_k_tasks(query_emb, [task_sql], k=1)
+        adapter, _, _ = select_adapter(ranked, reg)
+
+        # "sql" and "code" both appear in "code_sql" → 2 overlapping tokens vs 0 for py-lora
+        assert adapter.id == "sql-lora"
 
     def test_fallback_adapters_are_tried(self, tmp_path):
         """preferred list empty but fallback_adapters has a match."""

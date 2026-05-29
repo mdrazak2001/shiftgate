@@ -73,11 +73,18 @@ def select_adapter(
 ) -> tuple[AdapterEntry, TaskCluster, float]:
     """Select the best adapter given the ranked task list.
 
-    Strategy:
-      1. Iterate top tasks in similarity order.
-      2. For each task, try ``preferred_adapters`` then ``fallback_adapters``.
-      3. Return the first adapter that exists in the registry.
-      4. If no registered adapter matches any task, raise ``NoAdapterError``.
+    Strategy
+    --------
+    1. Iterate top tasks in similarity order.
+    2. For each task, try ``preferred_adapters`` then ``fallback_adapters``.
+    3. Return the first adapter that exists in the registry.
+    4. **Tag-overlap fallback** — if none of the task lists contained a
+       registered adapter (e.g. the user just added an adapter but hasn't
+       linked it to any task yet), score every registered adapter by how many
+       of its ``task_tags`` appear in any top-task's ID or tag vocabulary,
+       and return the highest-scoring one.  This means ``adapter add`` works
+       immediately without a separate linking step.
+    5. If the registry is completely empty, raise ``NoAdapterError``.
 
     Parameters
     ----------
@@ -90,6 +97,7 @@ def select_adapter(
     -------
     ``(AdapterEntry, TaskCluster, similarity_score)``
     """
+    # Pass 1: honour explicit preferred/fallback lists on each task cluster.
     for task, score in top_tasks:
         candidates = list(task.preferred_adapters) + list(task.fallback_adapters)
         for adapter_id in candidates:
@@ -103,12 +111,44 @@ def select_adapter(
                 )
                 return adapter, task, score
 
-    # No adapter matched — surface a helpful error.
-    task_ids = [t.id for t, _ in top_tasks]
-    raise NoAdapterError(
-        f"No registered adapter found for tasks {task_ids}. "
-        "Add adapters with `shiftgate adapter add <hf_repo>`."
+    # Pass 2: tag-overlap fallback.
+    # Build a vocabulary of tokens from the top-task IDs and descriptions so
+    # we can score each adapter by how relevant its tags are.
+    all_adapters = adapter_registry.list_adapters()
+    if not all_adapters:
+        task_ids = [t.id for t, _ in top_tasks]
+        raise NoAdapterError(
+            f"No adapters registered at all. "
+            "Add one with `shiftgate adapter add <hf_repo>`."
+        )
+
+    # Collect all words that appear in the top-task IDs (e.g. "code", "sql",
+    # "python") — these are the tokens we'll match adapter tags against.
+    task_vocab: set[str] = set()
+    for task, _ in top_tasks:
+        # task IDs are underscored slugs like "code_sql" or "text_summarize"
+        task_vocab.update(task.id.lower().split("_"))
+
+    best_adapter: AdapterEntry | None = None
+    best_overlap = -1
+    best_task, best_score = top_tasks[0]  # tie-break to the top task
+
+    for adapter in all_adapters:
+        adapter_tokens = {t.lower() for t in adapter.task_tags}
+        overlap = len(adapter_tokens & task_vocab)
+        if overlap > best_overlap:
+            best_overlap = overlap
+            best_adapter = adapter
+
+    # best_adapter is guaranteed non-None because all_adapters is non-empty.
+    assert best_adapter is not None
+    logger.debug(
+        "Tag-overlap fallback selected adapter '%s' (overlap=%d tokens) for task '%s'",
+        best_adapter.id,
+        best_overlap,
+        best_task.id,
     )
+    return best_adapter, best_task, best_score
 
 
 class NoAdapterError(RuntimeError):

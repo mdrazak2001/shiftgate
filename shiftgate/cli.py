@@ -62,6 +62,31 @@ def _get_embedder():
     return Embedder()
 
 
+def _auto_link_adapter(adapter, task_reg) -> list[str]:
+    """Add ``adapter.id`` to the ``preferred_adapters`` of matching task clusters.
+
+    A task cluster matches when at least one of the adapter's ``task_tags``
+    appears as a token in the task's ID (e.g. tag ``"sql"`` matches cluster
+    ``"code_sql"``).  The adapter is appended only if it is not already listed.
+
+    Returns the list of task IDs that were updated.
+    """
+    if not adapter.task_tags:
+        return []
+
+    adapter_tokens = {t.lower() for t in adapter.task_tags}
+    linked: list[str] = []
+
+    for task in task_reg.get_all_tasks():
+        task_tokens = set(task.id.lower().split("_"))
+        if adapter_tokens & task_tokens:  # non-empty intersection
+            if adapter.id not in task.preferred_adapters:
+                task.preferred_adapters.append(adapter.id)
+                linked.append(task.id)
+
+    return linked
+
+
 # ---------------------------------------------------------------------------
 # shiftgate init
 # ---------------------------------------------------------------------------
@@ -133,7 +158,7 @@ def adapter_add(
     description: Annotated[Optional[str], typer.Option(help="Short description.")] = None,
 ) -> None:
     """Register a new LoRA adapter from a HuggingFace repo or local path."""
-    _, adapter_reg = _load_registries()
+    task_reg, adapter_reg = _load_registries()
 
     kwargs: dict = {}
     if tags:
@@ -156,6 +181,21 @@ def adapter_add(
     console.print(f"   Base: {adapter.base_model}")
     if adapter.task_tags:
         console.print(f"   Tags: {', '.join(adapter.task_tags)}")
+
+    # Auto-link: add this adapter to the preferred_adapters list of every
+    # task cluster whose ID tokens overlap with the adapter's tags.
+    # e.g. tags=["sql","code"] links to "code_sql", "code_python", etc.
+    linked = _auto_link_adapter(adapter, task_reg)
+    if linked:
+        task_reg.save()
+        console.print(
+            f"   [dim]Linked to task cluster(s): {', '.join(linked)}[/dim]"
+        )
+    else:
+        console.print(
+            "   [dim]No matching task clusters found for these tags. "
+            "Use `shiftgate task list` to see available clusters.[/dim]"
+        )
 
 
 @adapter_app.command("list")
