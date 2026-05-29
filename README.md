@@ -2,6 +2,8 @@
 
 > **shiftgate is an intelligent routing layer that automatically selects the right LoRA adapter for each task in your local agent loop.**
 
+*Inspired by [LORAUTER](https://arxiv.org/abs/2601.21795) — Effective LoRA Adapter Routing using Task Representations (EPFL, 2026).*
+
 **Shiftgate is a routing layer. Users manage models and LoRA weights themselves.**  
 shiftgate stores only adapter *metadata* — it never downloads, caches, or manages weights.
 Your inference backend (Ollama, vLLM) is responsible for loading the weights; shiftgate just tells it *which* adapter to use for each query.
@@ -270,6 +272,12 @@ shiftgate/
 └── utils/
     └── display.py       # Rich panels, tables, animations
 ```
+
+---
+
+## References
+
+- [LORAUTER](https://arxiv.org/abs/2601.21795) — *Effective LoRA Adapter Routing using Task Representations* (Dhasade et al., EPFL, 2026). shiftgate's task-level semantic routing is inspired by this work; it is not a reimplementation of the paper's full algorithm.
 
 ---
 

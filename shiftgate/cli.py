@@ -159,12 +159,10 @@ def _verify_runtime_adapter(adapter: AdapterEntry, adapter_reg) -> None:
 
 @app.command()
 def init() -> None:
-    """Set up ~/.shiftgate/, compute task embeddings, and show a welcome message."""
+    """Set up ~/.shiftgate/ and compute task embeddings."""
     from shiftgate.registry.adapter_registry import AdapterRegistry
     from shiftgate.registry.task_registry import TaskRegistry
-    from shiftgate.utils.display import show_task_table, show_welcome_banner
-
-    show_welcome_banner()
+    from shiftgate.utils.display import show_task_table
 
     shiftgate_dir = Path.home() / ".shiftgate"
     shiftgate_dir.mkdir(parents=True, exist_ok=True)

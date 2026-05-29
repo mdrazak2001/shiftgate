@@ -333,19 +333,8 @@ def animate_swap(from_adapter: str, to_adapter: str, duration: float = 1.5) -> N
 # ---------------------------------------------------------------------------
 
 def show_welcome_banner() -> None:
-    """Print the shiftgate welcome banner shown during `shiftgate init`."""
-    banner = Text(justify="center")
-    banner.append("\n  ⚡ shiftgate  ", style="bold cyan")
-    banner.append("v0.1\n", style="dim")
-    banner.append("  Intelligent LoRA routing for local LLM inference\n", style="italic white")
-    banner.append("  Inspired by LORAUTER · EPFL 2026\n\n", style="dim")
-
-    panel = Panel(
-        Align.center(banner),
-        border_style="cyan",
-        expand=False,
-    )
-    console.print(Align.center(panel))
+    """Print a one-line banner (``shiftgate demo`` only)."""
+    console.print("\n[bold cyan]⚡ shiftgate[/bold cyan]\n")
 
 
 # ---------------------------------------------------------------------------
