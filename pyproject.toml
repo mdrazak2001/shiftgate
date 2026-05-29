@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "shiftgate"
-version = "0.1.3"
+version = "0.1.4"
 description = "Intelligent routing layer that automatically selects the right LoRA adapter for each task in your local agent loop."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -47,15 +47,23 @@ Homepage = "https://github.com/shiftgate-ai/shiftgate"
 Repository = "https://github.com/shiftgate-ai/shiftgate"
 Issues = "https://github.com/shiftgate-ai/shiftgate/issues"
 
+# Wheel: ship the whole importable package. Non-.py data files inside the
+# package directory (e.g. shiftgate/data/default_tasks.json) are included
+# automatically because they live under the packaged directory.
 [tool.hatch.build.targets.wheel]
 packages = ["shiftgate"]
 
-[tool.hatch.build.targets.wheel.force-include]
-"shiftgate/data/default_tasks.json" = "shiftgate/data/default_tasks.json"
-
+# Sdist: must contain the FULL source tree. The wheel published to PyPI is
+# built from the sdist, so a restrictive sdist `include` here silently strips
+# the .py modules out of the resulting wheel (the 0.1.3 regression). Include
+# the entire package plus tests so `uv build` / `python -m build` reproduce a
+# complete wheel.
 [tool.hatch.build.targets.sdist]
 include = [
-  "/shiftgate/data/default_tasks.json",
+  "/shiftgate",
+  "/tests",
+  "/README.md",
+  "/pyproject.toml",
 ]
 
 [tool.pytest.ini_options]
