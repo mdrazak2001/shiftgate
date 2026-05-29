@@ -93,6 +93,16 @@ class AdapterEntry(BaseModel):
         ),
     )
 
+    # --- backend verification result ---
+    verified: bool | None = Field(
+        default=None,
+        description=(
+            "Result of the last backend verification: True = the adapter's "
+            "runtime name was found loaded in a running backend, False = it was "
+            "not found, None = no backend was reachable when last checked."
+        ),
+    )
+
     @model_validator(mode="after")
     def _at_least_one_source(self) -> "AdapterEntry":
         """Warn (not error) when no source field is set.

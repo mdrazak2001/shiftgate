@@ -38,6 +38,21 @@ _CONNECT_TIMEOUT = 3.0
 _READ_TIMEOUT = 120.0
 
 
+def effective_backend_name(adapter: AdapterEntry) -> str:
+    """Return the name the inference backend knows this adapter by.
+
+    When the adapter was registered with ``--runtime <name>`` the user has
+    explicitly told us the backend loaded it under that name (e.g. a vLLM
+    ``--lora-modules`` key or an Ollama Modelfile model name).  In that case we
+    must send ``runtime_name`` — sending ``adapter.id`` would address a model
+    the backend has never heard of.
+
+    Priority: ``runtime_name`` (if set and non-empty) > ``id``.
+    """
+    runtime = (adapter.runtime_name or "").strip()
+    return runtime if runtime else adapter.id
+
+
 class BaseBackend(ABC):
     """Abstract base for inference backends."""
 
@@ -48,6 +63,14 @@ class BaseBackend(ABC):
     @abstractmethod
     def generate(self, prompt: str, adapter: AdapterEntry) -> str:
         """Send ``prompt`` to the backend and return the generated text."""
+
+    @abstractmethod
+    def list_loaded_adapters(self) -> list[str]:
+        """Return the model/adapter names currently loaded in the backend.
+
+        Must use a short timeout and silently return ``[]`` if the backend is
+        unreachable — this method is only used for informational verification.
+        """
 
 
 # ---------------------------------------------------------------------------
@@ -109,7 +132,9 @@ class OllamaBackend(BaseBackend):
             If True, Ollama streams response tokens.  This client reads the
             full stream and returns the concatenated text.
         """
-        model = model_name or adapter.id
+        # Explicit override wins; otherwise use the backend-effective name
+        # (runtime_name when set, else adapter.id).
+        model = model_name or effective_backend_name(adapter)
         payload = {"model": model, "prompt": prompt, "stream": stream}
 
         logger.debug("Ollama generate: model=%s", model)
@@ -125,6 +150,20 @@ class OllamaBackend(BaseBackend):
 
         data = r.json()
         return data.get("response", "")
+
+    def list_loaded_adapters(self) -> list[str]:
+        """Return the names of all models loaded in Ollama (``GET /api/tags``).
+
+        Silently returns ``[]`` if Ollama is unreachable.
+        """
+        try:
+            r = httpx.get(f"{self.base_url}/api/tags", timeout=_CONNECT_TIMEOUT)
+            r.raise_for_status()
+            models = r.json().get("models", [])
+            return [m["name"] for m in models if "name" in m]
+        except Exception as exc:
+            logger.debug("Ollama list_loaded_adapters failed: %s", exc)
+            return []
 
 
 # ---------------------------------------------------------------------------
@@ -183,7 +222,9 @@ class VLLMBackend(BaseBackend):
         system_prompt:
             System message prepended before the user message.
         """
-        model = lora_name or adapter.id
+        # Explicit override wins; otherwise use the backend-effective name
+        # (runtime_name when set, else adapter.id).
+        model = lora_name or effective_backend_name(adapter)
         payload = {
             "model": model,
             "messages": [
@@ -208,6 +249,21 @@ class VLLMBackend(BaseBackend):
             return data["choices"][0]["message"]["content"]
         except (KeyError, IndexError) as exc:
             raise BackendError(f"Unexpected vLLM response format: {data}") from exc
+
+    def list_loaded_adapters(self) -> list[str]:
+        """Return all model/LoRA ids served by vLLM (``GET /v1/models``).
+
+        The ``data`` array lists the base model plus every ``--lora-modules``
+        key.  Silently returns ``[]`` if vLLM is unreachable.
+        """
+        try:
+            r = httpx.get(f"{self.base_url}/v1/models", timeout=_CONNECT_TIMEOUT)
+            r.raise_for_status()
+            data = r.json().get("data", [])
+            return [m["id"] for m in data if "id" in m]
+        except Exception as exc:
+            logger.debug("vLLM list_loaded_adapters failed: %s", exc)
+            return []
 
 
 # ---------------------------------------------------------------------------
@@ -275,6 +331,37 @@ class BackendRouter:
         if self._active is self._vllm:
             return "vllm"
         return None
+
+    @property
+    def active_backend_url(self) -> str | None:
+        """Return the base URL of the active backend, or None."""
+        if self._active is not None:
+            return self._active.base_url
+        return None
+
+    def verify_adapter(self, adapter: AdapterEntry) -> tuple[bool, str | None]:
+        """Check whether an adapter is actually loaded in the active backend.
+
+        Auto-detects a backend if one hasn't been probed yet.
+
+        Returns
+        -------
+        ``(is_loaded, backend_name)``
+            - ``(True, "<name>")``  — backend running and the adapter's
+              effective name is present in its loaded model list.
+            - ``(False, "<name>")`` — backend running but the name is absent.
+            - ``(False, None)``     — no backend reachable (verification skipped).
+
+        Never raises: HTTP failures degrade to ``(False, None)``.
+        """
+        if self._active is None:
+            self.detect()
+        if self._active is None:
+            return (False, None)
+
+        target = effective_backend_name(adapter)
+        loaded = self._active.list_loaded_adapters()
+        return (target in loaded, self.active_backend_name)
 
 
 # ---------------------------------------------------------------------------

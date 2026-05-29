@@ -411,3 +411,148 @@ def show_status(
     grid.add_row("Embeddings", Text(emb_label, style=emb_style))
 
     console.print(Panel(grid, title="shiftgate status", border_style="cyan", expand=False))
+
+
+# ---------------------------------------------------------------------------
+# Doctor report
+# ---------------------------------------------------------------------------
+
+def show_doctor_report(
+    *,
+    embedder_ok: bool,
+    embedder_detail: str,
+    backend_name: str | None,
+    backend_url: str | None,
+    adapter_rows: list[dict],
+    n_tasks: int,
+    n_with_embeddings: int,
+    unlinked_tasks: list[str],
+) -> None:
+    """Render the full ``shiftgate doctor`` health report.
+
+    Parameters mirror the checks performed in ``cli.doctor``.  Each section is
+    a Rich panel/table; a final summary line tallies pass / warn / fail.
+    """
+    ok_mark = "[green]✓[/green]"
+    warn_mark = "[yellow]⚠[/yellow]"
+    fail_mark = "[red]✗[/red]"
+
+    warnings = 0
+    failures = 0
+
+    console.print()
+    console.rule("[bold cyan]shiftgate doctor[/bold cyan]")
+    console.print()
+
+    # --- Core checks grid ---
+    core = Table.grid(padding=(0, 2))
+    core.add_column(width=3)
+    core.add_column(style="bold", min_width=18)
+    core.add_column()
+
+    # Embedder
+    if embedder_ok:
+        core.add_row(ok_mark, "Embedder", Text(f"loaded ({embedder_detail})", style="green"))
+    else:
+        failures += 1
+        core.add_row(fail_mark, "Embedder", Text(f"failed: {embedder_detail}", style="red"))
+
+    # Backend
+    if backend_name:
+        core.add_row(
+            ok_mark,
+            "Backend",
+            Text(f"{backend_name}  ({backend_url})", style="green"),
+        )
+    else:
+        warnings += 1
+        core.add_row(
+            warn_mark,
+            "Backend",
+            Text("none detected — start ollama serve or vLLM", style="yellow"),
+        )
+
+    # Task embeddings
+    if n_tasks > 0 and n_with_embeddings == n_tasks:
+        core.add_row(
+            ok_mark,
+            "Task embeddings",
+            Text(f"{n_with_embeddings}/{n_tasks} clusters ready", style="green"),
+        )
+    else:
+        warnings += 1
+        core.add_row(
+            warn_mark,
+            "Task embeddings",
+            Text(
+                f"{n_with_embeddings}/{n_tasks} computed — run `shiftgate init`",
+                style="yellow",
+            ),
+        )
+
+    console.print(Panel(core, title="Core", border_style="cyan", expand=False))
+    console.print()
+
+    # --- Adapter availability table ---
+    if adapter_rows:
+        table = Table(
+            title="Adapter runtime availability",
+            box=box.ROUNDED,
+            header_style="bold cyan",
+            border_style="cyan",
+        )
+        table.add_column("Adapter ID", style="bold magenta")
+        table.add_column("Backend name")
+        table.add_column("Linked", justify="center")
+        table.add_column("Loaded", justify="center")
+
+        for row in adapter_rows:
+            linked = (
+                "[green]linked[/green]" if row["status"] == "linked"
+                else "[yellow]unassigned[/yellow]"
+            )
+            state = row["state"]
+            if state == "loaded":
+                loaded = f"{ok_mark} loaded"
+            elif state == "missing":
+                warnings += 1
+                loaded = f"{warn_mark} not loaded"
+            else:  # unknown — no backend
+                loaded = "[dim]— (no backend)[/dim]"
+            table.add_row(row["id"], row["runtime"], linked, loaded)
+
+        console.print(table)
+    else:
+        console.print("[dim]No adapters registered. Add one with `shiftgate adapter add`.[/dim]")
+    console.print()
+
+    # --- Unlinked task clusters warning ---
+    if unlinked_tasks:
+        warnings += 1
+        console.print(
+            Panel(
+                Text(
+                    "These task clusters have no linked adapter and will return "
+                    "'No adapter available' if matched:\n  "
+                    + ", ".join(unlinked_tasks),
+                    style="yellow",
+                ),
+                title=f"{warn_mark} Unlinked task clusters ({len(unlinked_tasks)})",
+                border_style="yellow",
+                expand=False,
+            )
+        )
+        console.print()
+
+    # --- Summary line ---
+    if failures:
+        summary = f"[bold red]{failures} failed[/bold red]"
+        if warnings:
+            summary += f", [yellow]{warnings} warning(s)[/yellow]"
+    elif warnings:
+        summary = f"[bold yellow]{warnings} warning(s)[/bold yellow] — shiftgate is usable but check above"
+    else:
+        summary = "[bold green]All checks passed — shiftgate is healthy.[/bold green]"
+
+    console.print(f"  {summary}")
+    console.print()

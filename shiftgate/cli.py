@@ -117,6 +117,42 @@ def _finish_adapter_add(adapter: AdapterEntry, task_reg, adapter_reg) -> None:
         )
 
 
+def _verify_runtime_adapter(adapter: AdapterEntry, adapter_reg) -> None:
+    """Best-effort check that a runtime adapter is loaded in a live backend.
+
+    Updates ``adapter.verified`` (True / False / None) and re-saves the
+    registry.  Never raises — verification is purely informational and must
+    not fail the ``adapter add`` command.
+    """
+    from shiftgate.runtime.backend import BackendRouter
+
+    try:
+        with console.status("[cyan]Verifying adapter against running backend…[/cyan]"):
+            router = BackendRouter()
+            is_loaded, backend_name = router.verify_adapter(adapter)
+    except Exception as exc:  # pragma: no cover - defensive, should not happen
+        logger_msg = f"verification error: {exc}"
+        console.print(f"   [dim]Backend: verification skipped ({logger_msg})[/dim]")
+        return
+
+    runtime = adapter.runtime_name or adapter.id
+
+    if backend_name is None:
+        adapter.verified = None
+        console.print("   [dim]Backend: not running (verification skipped)[/dim]")
+    elif is_loaded:
+        adapter.verified = True
+        console.print(f"   [green]Backend: {backend_name} ✓ verified[/green]")
+    else:
+        adapter.verified = False
+        console.print(
+            f"   [yellow]Backend: {backend_name} ⚠ runtime '{runtime}' not loaded "
+            "— did you pass --lora-modules?[/yellow]"
+        )
+
+    adapter_reg.save()
+
+
 # ---------------------------------------------------------------------------
 # shiftgate init
 # ---------------------------------------------------------------------------
@@ -290,6 +326,11 @@ def adapter_add(
 
     adapter_reg.add_adapter(adapter)
     _finish_adapter_add(adapter, task_reg, adapter_reg)
+
+    # For runtime-registered adapters, try to confirm the backend actually
+    # has it loaded. Purely informational — never fails the add command.
+    if adapter.runtime_name:
+        _verify_runtime_adapter(adapter, adapter_reg)
 
 
 @adapter_app.command("list")
@@ -590,6 +631,79 @@ def status() -> None:
         n_adapters=len(adapter_reg),
         n_tasks=len(task_reg),
         embeddings_ready=task_reg.embeddings_ready(),
+    )
+
+
+# ---------------------------------------------------------------------------
+# shiftgate doctor
+# ---------------------------------------------------------------------------
+
+@app.command()
+def doctor() -> None:
+    """Run a full health check and print a diagnostic report.
+
+    Checks the embedder, the inference backend, every registered adapter's
+    runtime availability, task-embedding readiness, and flags any task
+    clusters that have no linked adapter.  Run this whenever something feels off.
+    """
+    from shiftgate.runtime.backend import BackendRouter, effective_backend_name
+    from shiftgate.utils.display import show_doctor_report
+
+    task_reg, adapter_reg = _load_registries()
+
+    # --- 1. Embedder ---
+    embedder_ok = False
+    embedder_detail = ""
+    with console.status("[cyan]Checking embedder…[/cyan]"):
+        try:
+            vec = _get_embedder().embed("test")
+            embedder_ok = vec is not None and len(vec) > 0
+            embedder_detail = f"dim={len(vec)}" if embedder_ok else "empty embedding"
+        except Exception as exc:
+            embedder_detail = str(exc)
+
+    # --- 2. Backend ---
+    with console.status("[cyan]Probing backends…[/cyan]"):
+        router = BackendRouter()
+        backend_name = router.detect()
+        backend_url = router.active_backend_url
+        loaded_adapters: list[str] = []
+        if backend_name is not None and router._active is not None:
+            loaded_adapters = router._active.list_loaded_adapters()
+
+    # --- 3. Per-adapter runtime availability ---
+    adapter_rows = []
+    for a in adapter_reg.list_adapters():
+        effective = effective_backend_name(a)
+        if backend_name is None:
+            state = "unknown"  # no backend to check against
+        elif effective in loaded_adapters:
+            state = "loaded"
+        else:
+            state = "missing"
+        adapter_rows.append(
+            {"id": a.id, "runtime": effective, "status": a.status, "state": state}
+        )
+
+    # --- 4 & 5. Task embedding readiness + unlinked clusters ---
+    all_tasks = task_reg.get_all_tasks()
+    n_with_embeddings = sum(1 for t in all_tasks if t.embedding_centroid is not None)
+    registered_ids = {a.id for a in adapter_reg.list_adapters()}
+    unlinked_tasks = [
+        t.id
+        for t in all_tasks
+        if not (set(t.preferred_adapters) | set(t.fallback_adapters)) & registered_ids
+    ]
+
+    show_doctor_report(
+        embedder_ok=embedder_ok,
+        embedder_detail=embedder_detail,
+        backend_name=backend_name,
+        backend_url=backend_url,
+        adapter_rows=adapter_rows,
+        n_tasks=len(all_tasks),
+        n_with_embeddings=n_with_embeddings,
+        unlinked_tasks=unlinked_tasks,
     )
 
 
