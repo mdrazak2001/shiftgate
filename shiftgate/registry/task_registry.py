@@ -3,7 +3,7 @@ Task registry: load, persist, and manage TaskCluster definitions.
 
 The registry reads from (in priority order):
   1. ``~/.shiftgate/tasks.json``  — user-edited / previously saved
-  2. ``<package>/../../data/default_tasks.json``  — bundled defaults
+  2. ``shiftgate.data/default_tasks.json``  — bundled defaults (via importlib.resources)
 
 On first run (``shiftgate init``) the ``compute_embeddings`` method is called
 to populate ``embedding_centroid`` for every cluster and cache them to
@@ -12,6 +12,7 @@ to populate ``embedding_centroid`` for every cluster and cache them to
 
 from __future__ import annotations
 
+import importlib.resources
 import json
 import logging
 from pathlib import Path
@@ -31,8 +32,24 @@ _SHIFTGATE_DIR = Path.home() / ".shiftgate"
 _USER_TASKS_PATH = _SHIFTGATE_DIR / "tasks.json"
 _CACHE_PATH = _SHIFTGATE_DIR / "embeddings_cache.npy"
 
-# Path to the bundled default tasks, resolved relative to this file's location.
-_DEFAULT_TASKS_PATH = Path(__file__).parent.parent.parent / "data" / "default_tasks.json"
+# Legacy dev-checkout path kept for backwards compatibility with source trees
+# that still ship repo-root ``data/default_tasks.json``.
+_LEGACY_DEFAULT_TASKS_PATH = Path(__file__).parent.parent.parent / "data" / "default_tasks.json"
+_BUNDLED_DEFAULT_TASKS_LABEL = "shiftgate.data/default_tasks.json"
+
+
+def _read_bundled_default_tasks() -> str:
+    """Return the bundled default task registry JSON from the installed package."""
+    try:
+        resource = importlib.resources.files("shiftgate.data") / "default_tasks.json"
+        return resource.read_text(encoding="utf-8")
+    except (FileNotFoundError, ModuleNotFoundError, TypeError):
+        pass
+
+    if _LEGACY_DEFAULT_TASKS_PATH.exists():
+        return _LEGACY_DEFAULT_TASKS_PATH.read_text(encoding="utf-8")
+
+    raise FileNotFoundError(_BUNDLED_DEFAULT_TASKS_LABEL)
 
 
 class TaskRegistry:
@@ -58,22 +75,25 @@ class TaskRegistry:
         """Load the task registry from disk.
 
         Prefers the user's ``~/.shiftgate/tasks.json`` and falls back to the
-        bundled ``data/default_tasks.json`` if the user file does not exist.
+        bundled ``shiftgate.data/default_tasks.json`` if the user file does not exist.
         """
         if _USER_TASKS_PATH.exists():
             source = _USER_TASKS_PATH
-        elif _DEFAULT_TASKS_PATH.exists():
-            source = _DEFAULT_TASKS_PATH
+            raw = json.loads(source.read_text(encoding="utf-8"))
         else:
-            raise FileNotFoundError(
-                f"No task registry found. Expected one of:\n"
-                f"  {_USER_TASKS_PATH}\n"
-                f"  {_DEFAULT_TASKS_PATH}\n"
-                "Run `shiftgate init` to set up the default registry."
-            )
+            try:
+                raw_text = _read_bundled_default_tasks()
+            except FileNotFoundError:
+                raise FileNotFoundError(
+                    f"No task registry found. Expected one of:\n"
+                    f"  {_USER_TASKS_PATH}\n"
+                    f"  {_BUNDLED_DEFAULT_TASKS_LABEL}\n"
+                    "Run `shiftgate init` to set up the default registry."
+                ) from None
+            source = Path(_BUNDLED_DEFAULT_TASKS_LABEL)
+            raw = json.loads(raw_text)
 
         logger.debug("Loading task registry from %s", source)
-        raw = json.loads(source.read_text(encoding="utf-8"))
         tasks = [TaskCluster.model_validate(t) for t in raw]
         instance = cls(tasks, source_path=source)
 

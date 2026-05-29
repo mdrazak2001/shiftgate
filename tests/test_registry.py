@@ -319,6 +319,29 @@ class TestTaskRegistry:
         assert len(reg) == 1
         assert reg.get_task("test_task").name == "Updated Task"
 
+    def test_load_bundled_defaults_when_no_user_registry(self, tmp_shiftgate):
+        """Packaged defaults load via importlib when ~/.shiftgate/tasks.json is absent."""
+        reg = TaskRegistry.load()
+        assert len(reg) == 10
+        assert reg.get_task("code_python") is not None
+        assert reg.get_task("code_sql") is not None
+
+    def test_user_registry_takes_priority_over_bundled_defaults(self, tmp_shiftgate, sample_task):
+        """Existing user registries continue to win over bundled defaults."""
+        import shiftgate.registry.task_registry as tr_mod
+
+        user_path = tmp_shiftgate / "tasks.json"
+        user_path.write_text(
+            json.dumps([sample_task.model_dump()]),
+            encoding="utf-8",
+        )
+        assert tr_mod._USER_TASKS_PATH == user_path
+
+        reg = TaskRegistry.load()
+        assert len(reg) == 1
+        assert reg.get_task("test_task") is not None
+        assert reg.get_task("code_python") is None
+
 
 # ---------------------------------------------------------------------------
 # _auto_link_adapter helper tests

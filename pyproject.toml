@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "shiftgate"
-version = "0.1.2"
+version = "0.1.3"
 description = "Intelligent routing layer that automatically selects the right LoRA adapter for each task in your local agent loop."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -49,6 +49,14 @@ Issues = "https://github.com/shiftgate-ai/shiftgate/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["shiftgate"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"shiftgate/data/default_tasks.json" = "shiftgate/data/default_tasks.json"
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "/shiftgate/data/default_tasks.json",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

@@ -1,0 +1,187 @@
+[
+  {
+    "id": "code_python",
+    "name": "Python Code Generation",
+    "description": "Writing, completing, or refactoring Python code including functions, classes, scripts, and modules.",
+    "validation_examples": [
+      "Write a Python function to reverse a linked list",
+      "Create a Python class for a binary search tree",
+      "Implement quicksort in Python",
+      "Write a decorator that caches function results in Python",
+      "Refactor this Python code to use list comprehensions",
+      "Write a Python script to parse CSV files and compute statistics",
+      "Create a Python context manager for database connections",
+      "Generate a Python dataclass for a user profile"
+    ],
+    "embedding_centroid": null,
+    "preferred_adapters": [],
+    "fallback_adapters": []
+  },
+  {
+    "id": "code_sql",
+    "name": "SQL Query Writing",
+    "description": "Writing SQL queries including SELECT, JOIN, aggregations, CTEs, window functions, and schema design.",
+    "validation_examples": [
+      "Write a SQL query to find duplicate rows in a table",
+      "Create a SQL query with a LEFT JOIN between orders and customers",
+      "Write a SQL window function to calculate running totals",
+      "Generate a SQL CTE to rank employees by department salary",
+      "Write a SQL query to find users who made purchases in the last 30 days",
+      "Create a SQL stored procedure for bulk inserts",
+      "Write a SQL query using GROUP BY and HAVING to filter aggregates",
+      "Generate a SQL schema for an e-commerce database"
+    ],
+    "embedding_centroid": null,
+    "preferred_adapters": [],
+    "fallback_adapters": []
+  },
+  {
+    "id": "code_javascript",
+    "name": "JavaScript and TypeScript",
+    "description": "Writing or reviewing JavaScript and TypeScript code for frontend, Node.js, or full-stack applications.",
+    "validation_examples": [
+      "Write a React hook to fetch data from an API",
+      "Create a TypeScript interface for a REST API response",
+      "Implement a JavaScript debounce function",
+      "Write an async function to handle file uploads in Node.js",
+      "Create a TypeScript generic type for a paginated API response",
+      "Write a JavaScript event listener for form validation",
+      "Implement a Promise-based queue in JavaScript",
+      "Write a Next.js API route that authenticates with JWT"
+    ],
+    "embedding_centroid": null,
+    "preferred_adapters": [],
+    "fallback_adapters": []
+  },
+  {
+    "id": "code_debug",
+    "name": "Debugging and Error Fixing",
+    "description": "Diagnosing, explaining, and fixing bugs, exceptions, and unexpected behaviour in any programming language.",
+    "validation_examples": [
+      "Fix the KeyError in this Python dictionary access code",
+      "Why is this JavaScript async function returning undefined?",
+      "Debug this SQL query that returns no results",
+      "Find the memory leak in this C++ code",
+      "Why does this React component re-render infinitely?",
+      "Fix the NullPointerException in this Java method",
+      "Explain and fix this Python TypeError: unsupported operand",
+      "Debug why this API call returns 403 Forbidden",
+      "Fix the off-by-one error in this loop"
+    ],
+    "embedding_centroid": null,
+    "preferred_adapters": [],
+    "fallback_adapters": []
+  },
+  {
+    "id": "text_summarize",
+    "name": "Text Summarization",
+    "description": "Condensing long documents, articles, papers, or conversations into concise summaries.",
+    "validation_examples": [
+      "Summarise this research paper in 3 bullet points",
+      "Give me a TL;DR of this news article",
+      "Write an executive summary of this annual report",
+      "Condense this meeting transcript into action items",
+      "Summarise the key findings from this dataset description",
+      "Create a one-paragraph abstract for this technical documentation",
+      "What are the main takeaways from this blog post?",
+      "Summarise this legal contract in plain English"
+    ],
+    "embedding_centroid": null,
+    "preferred_adapters": [],
+    "fallback_adapters": []
+  },
+  {
+    "id": "text_classify",
+    "name": "Text Classification and Labeling",
+    "description": "Classifying, categorising, or labelling text — sentiment, intent, topic, or custom taxonomy.",
+    "validation_examples": [
+      "Classify this customer review as positive, negative, or neutral",
+      "Label these support tickets by urgency level",
+      "Categorise these product descriptions by department",
+      "Detect the intent behind this user message: book a flight",
+      "Tag these news headlines with their topic",
+      "Classify this email as spam or legitimate",
+      "Label this text for named entity recognition",
+      "Determine the sentiment of these tweets",
+      "Categorise these bug reports by severity"
+    ],
+    "embedding_centroid": null,
+    "preferred_adapters": [],
+    "fallback_adapters": []
+  },
+  {
+    "id": "text_translate",
+    "name": "Language Translation",
+    "description": "Translating text between languages, including idioms, technical content, and cultural adaptation.",
+    "validation_examples": [
+      "Translate this paragraph from English to French",
+      "Translate this technical document to Spanish",
+      "Convert this German medical text to English",
+      "Translate this Japanese product description to English",
+      "Localise this marketing copy from English to Portuguese",
+      "Translate this legal clause from Latin to English",
+      "Convert this Chinese business email to English",
+      "Translate this Python error message to plain English"
+    ],
+    "embedding_centroid": null,
+    "preferred_adapters": [],
+    "fallback_adapters": []
+  },
+  {
+    "id": "math_reasoning",
+    "name": "Math and Quantitative Reasoning",
+    "description": "Solving arithmetic, algebra, calculus, statistics, logic puzzles, and word problems step by step.",
+    "validation_examples": [
+      "Solve this system of linear equations",
+      "Calculate the derivative of this function",
+      "What is the probability of drawing two aces from a deck?",
+      "Solve this word problem: if a train leaves at 3 PM at 60 mph...",
+      "Compute the integral of x^2 from 0 to 5",
+      "Find the eigenvalues of this matrix",
+      "How many ways can 5 people be seated in a row?",
+      "What is 15% compound interest on $10,000 over 3 years?",
+      "Prove that the square root of 2 is irrational"
+    ],
+    "embedding_centroid": null,
+    "preferred_adapters": [],
+    "fallback_adapters": []
+  },
+  {
+    "id": "qa_factual",
+    "name": "Factual Q&A",
+    "description": "Answering factual questions about history, science, geography, technology, or general knowledge.",
+    "validation_examples": [
+      "What is the capital of Australia?",
+      "Who invented the telephone?",
+      "What year did World War II end?",
+      "What is the speed of light in a vacuum?",
+      "Explain how HTTPS encryption works",
+      "What is the difference between RAM and ROM?",
+      "What causes the aurora borealis?",
+      "How many bones are in the human body?",
+      "What is the GDP of Germany?"
+    ],
+    "embedding_centroid": null,
+    "preferred_adapters": [],
+    "fallback_adapters": []
+  },
+  {
+    "id": "agent_planning",
+    "name": "Task Decomposition and Agent Planning",
+    "description": "Breaking down complex goals into step-by-step plans, sub-tasks, or agent workflows.",
+    "validation_examples": [
+      "Create a step-by-step plan to build a REST API from scratch",
+      "Decompose the task of launching a product into weekly milestones",
+      "Write a plan for migrating a database to the cloud",
+      "Break down the goal 'build a recommendation system' into sub-tasks",
+      "Create an agent workflow to automate data ingestion and reporting",
+      "Plan the steps to refactor a monolith into microservices",
+      "What are the subtasks needed to onboard a new engineer?",
+      "Outline a research plan for evaluating three competing ML models",
+      "Create a checklist for deploying a web app to production"
+    ],
+    "embedding_centroid": null,
+    "preferred_adapters": [],
+    "fallback_adapters": []
+  }
+]
