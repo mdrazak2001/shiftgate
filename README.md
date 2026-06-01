@@ -253,6 +253,20 @@ shiftgate adapter add sql-lora --local /models/sql-lora --tags sql --base llama3
 
 Useful for exploring routing decisions before your backend is set up. To run inference, load the adapter in vLLM or Ollama and re-register with `--runtime`.
 
+### Option 4 — Cerebras (cloud)
+
+shiftgate also supports [Cerebras](https://cerebras.ai/) as a cloud fallback. It uses Cerebras' OpenAI-compatible API and authenticates with a bearer token from the `CEREBRAS_API_KEY` environment variable (or the `--cerebras-key` global flag).
+
+```bash
+export CEREBRAS_API_KEY=csk-...
+shiftgate adapter add llama3.1-8b --runtime llama3.1-8b --tags general --base llama3.1
+shiftgate run "write a python sorting function"
+```
+
+shiftgate auto-detects backends in the order **Ollama → vLLM → Cerebras**, so local backends always win and Cerebras is used only when no local backend is running.
+
+> **Honest status:** shiftgate routes to Cerebras' base-model inference today. When Cerebras Multi-LoRA goes public, register your adapter with `--runtime <cerebras-lora-id>` and it just works — no shiftgate update needed.
+
 ---
 
 ## How to contribute adapters

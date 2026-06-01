@@ -39,6 +39,26 @@ app.add_typer(task_app, name="task")
 app.add_typer(feedback_app, name="feedback")
 
 
+@app.callback()
+def _main(
+    cerebras_key: Annotated[
+        Optional[str],
+        typer.Option(
+            "--cerebras-key",
+            help=(
+                "Cerebras API key. If passed, sets CEREBRAS_API_KEY for this run "
+                "so the Cerebras cloud backend becomes available."
+            ),
+        ),
+    ] = None,
+) -> None:
+    """Global options applied before any command runs."""
+    if cerebras_key:
+        import os
+
+        os.environ["CEREBRAS_API_KEY"] = cerebras_key
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

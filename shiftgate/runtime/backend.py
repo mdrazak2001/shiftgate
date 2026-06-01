@@ -25,6 +25,7 @@ health endpoint and delegates to whichever is available.
 from __future__ import annotations
 
 import logging
+import os
 from abc import ABC, abstractmethod
 
 import httpx
@@ -267,29 +268,137 @@ class VLLMBackend(BaseBackend):
 
 
 # ---------------------------------------------------------------------------
+# Cerebras (cloud, OpenAI-compatible)
+# ---------------------------------------------------------------------------
+
+class CerebrasBackend(BaseBackend):
+    """Thin httpx client for the Cerebras cloud inference API.
+
+    Cerebras exposes an OpenAI-compatible API at ``https://api.cerebras.ai/v1``
+    and authenticates with a bearer token read from the ``CEREBRAS_API_KEY``
+    environment variable (or passed explicitly to the constructor).
+
+    LoRA adapters on Cerebras
+    -------------------------
+    Today shiftgate routes to Cerebras' base-model inference: the ``model``
+    field is set to ``effective_backend_name(adapter)``.  When Cerebras
+    Multi-LoRA becomes public, register your adapter with
+    ``--runtime <cerebras-lora-id>`` and routing works unchanged.
+    """
+
+    def __init__(self, api_key: str | None = None) -> None:
+        self.base_url = "https://api.cerebras.ai/v1"
+        self.api_key = api_key or os.getenv("CEREBRAS_API_KEY")
+
+    def _headers(self) -> dict[str, str]:
+        return {"Authorization": f"Bearer {self.api_key}"}
+
+    def is_available(self) -> bool:
+        """Return True only if an API key is set and ``/models`` returns 200.
+
+        No network call is made when the API key is unset.
+        """
+        if not self.api_key:
+            return False
+        try:
+            r = httpx.get(
+                f"{self.base_url}/models",
+                headers=self._headers(),
+                timeout=_CONNECT_TIMEOUT,
+            )
+            return r.status_code == 200
+        except Exception:
+            return False
+
+    def generate(
+        self,
+        prompt: str,
+        adapter: AdapterEntry,
+        *,
+        lora_name: str | None = None,
+        system_prompt: str = "You are a helpful assistant.",
+    ) -> str:
+        """Generate text via Cerebras' ``/chat/completions`` endpoint.
+
+        Mirrors :meth:`VLLMBackend.generate`: an explicit ``lora_name`` wins,
+        otherwise the adapter's effective backend name is used as ``model``.
+        """
+        model = lora_name or effective_backend_name(adapter)
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt},
+            ],
+        }
+
+        logger.debug("Cerebras generate: model=%s", model)
+        try:
+            r = httpx.post(
+                f"{self.base_url}/chat/completions",
+                json=payload,
+                headers=self._headers(),
+                timeout=_READ_TIMEOUT,
+            )
+            r.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise BackendError(f"Cerebras request failed: {exc}") from exc
+
+        data = r.json()
+        try:
+            return data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError) as exc:
+            raise BackendError(f"Unexpected Cerebras response format: {data}") from exc
+
+    def list_loaded_adapters(self) -> list[str]:
+        """Return all model ids served by Cerebras (``GET /models``).
+
+        Silently returns ``[]`` if the API key is unset or Cerebras is
+        unreachable.
+        """
+        if not self.api_key:
+            return []
+        try:
+            r = httpx.get(
+                f"{self.base_url}/models",
+                headers=self._headers(),
+                timeout=_CONNECT_TIMEOUT,
+            )
+            r.raise_for_status()
+            data = r.json().get("data", [])
+            return [m["id"] for m in data if "id" in m]
+        except Exception as exc:
+            logger.debug("Cerebras list_loaded_adapters failed: %s", exc)
+            return []
+
+
+# ---------------------------------------------------------------------------
 # BackendRouter — auto-detects which backend is live
 # ---------------------------------------------------------------------------
 
 class BackendRouter:
-    """Detects and delegates to whichever local backend is running.
+    """Detects and delegates to whichever backend is running.
 
-    Priority: Ollama first, then vLLM.  If neither is available, calls to
-    ``generate`` raise ``NoBackendError`` with a helpful message.
+    Priority: Ollama → vLLM → Cerebras (local backends first, cloud as
+    fallback).  If none is available, calls to ``generate`` raise
+    ``NoBackendError`` with a helpful message.
     """
 
     def __init__(
         self,
         ollama_url: str = "http://localhost:11434",
         vllm_url: str = "http://localhost:8000",
+        cerebras_api_key: str | None = None,
     ) -> None:
         self._ollama = OllamaBackend(ollama_url)
         self._vllm = VLLMBackend(vllm_url)
+        self._cerebras = CerebrasBackend(cerebras_api_key)
         self._active: BaseBackend | None = None
 
     def detect(self) -> str | None:
-        """Probe both backends and return the name of the one that responds.
+        """Probe backends and return the name of the first that responds.
 
-        Returns ``"ollama"``, ``"vllm"``, or ``None``.
+        Returns ``"ollama"``, ``"vllm"``, ``"cerebras"``, or ``None``.
         """
         if self._ollama.is_available():
             self._active = self._ollama
@@ -297,6 +406,9 @@ class BackendRouter:
         if self._vllm.is_available():
             self._active = self._vllm
             return "vllm"
+        if self._cerebras.is_available():
+            self._active = self._cerebras
+            return "cerebras"
         self._active = None
         return None
 
@@ -315,9 +427,10 @@ class BackendRouter:
         if self._active is None:
             raise NoBackendError(
                 "No inference backend detected.\n"
-                "  • Start Ollama : ollama serve\n"
-                "  • Start vLLM  : python -m vllm.entrypoints.openai.api_server "
-                "--model <base_model> --enable-lora\n\n"
+                "  • Start Ollama  : ollama serve\n"
+                "  • Start vLLM    : python -m vllm.entrypoints.openai.api_server "
+                "--model <base_model> --enable-lora\n"
+                "  • Use Cerebras  : export CEREBRAS_API_KEY=csk-...\n\n"
                 "shiftgate can route queries without a backend. "
                 "Use `shiftgate route` to see routing decisions without inference."
             )
@@ -330,6 +443,8 @@ class BackendRouter:
             return "ollama"
         if self._active is self._vllm:
             return "vllm"
+        if self._active is self._cerebras:
+            return "cerebras"
         return None
 
     @property
