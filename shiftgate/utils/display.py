@@ -69,6 +69,8 @@ def show_routing_decision(
     adapter: AdapterEntry | None = None,
     task_name: str | None = None,
     backend_name: str | None = None,
+    loaded_runtimes: set[str] | None = None,
+    selection_method: str | None = None,
 ) -> None:
     """Print a Rich Panel describing a routing decision.
 
@@ -81,7 +83,13 @@ def show_routing_decision(
     task_name:
         Human-readable task cluster name (falls back to trace.matched_task_id).
     backend_name:
-        Active backend name ('ollama', 'vllm', or None).
+        Active backend name ('ollama', 'vllm', 'cerebras', or None).
+    loaded_runtimes:
+        Optional set of runtime names loaded on the active backend (used to
+        explain a ``no_adapter_on_active_backend`` outcome).
+    selection_method:
+        The ``MatchResult.selection_method`` (e.g. ``"no_adapter_for_task"`` or
+        ``"no_adapter_on_active_backend"``) used to tailor the no-adapter help.
     """
     # When no adapter was selected the decision is unactionable — render red
     # regardless of how confident the task match was.
@@ -101,7 +109,25 @@ def show_routing_decision(
     task_text.append_text(_similarity_bar(trace.similarity_score))
     grid.add_row("Matched Task", task_text)
 
-    if no_adapter:
+    if no_adapter and selection_method == "no_adapter_on_active_backend":
+        # Adapters are linked to this task but none are loaded on the active
+        # backend — a different, backend-specific message.
+        grid.add_row(
+            "Adapter",
+            Text(
+                f"No adapter loaded on backend '{backend_name or 'unknown'}'",
+                style="bold red",
+            ),
+        )
+        runtimes = sorted(loaded_runtimes) if loaded_runtimes else []
+        runtimes_label = ", ".join(runtimes) if runtimes else "(none)"
+        grid.add_row("Loaded runtimes", Text(runtimes_label, style="dim"))
+        suggestion = Text()
+        suggestion.append("Try ", style="dim")
+        suggestion.append("shiftgate adapter list", style="cyan")
+        suggestion.append(" to see what's registered.", style="dim")
+        grid.add_row("Suggestion", suggestion)
+    elif no_adapter:
         # Never silently substitute an adapter. Tell the user how to fix it.
         adapter_text = Text("No adapter available", style="bold red")
         grid.add_row("Adapter", adapter_text)

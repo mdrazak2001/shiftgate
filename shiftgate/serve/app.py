@@ -22,6 +22,7 @@ The actual upstream HTTP is delegated to a *forwarder* object stored on
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, AsyncIterator, Optional
 
 import httpx
@@ -39,6 +40,7 @@ logger = logging.getLogger(__name__)
 
 _ROUTE_HEADER = "X-Shiftgate-Route"
 _READ_TIMEOUT = 120.0
+_RUNTIMES_TTL = 60.0  # seconds to cache the active backend's loaded-runtime list
 
 
 # ---------------------------------------------------------------------------
@@ -127,6 +129,8 @@ def create_app(
     app.state.backend_router = backend_router
     app.state.backend_choice = backend
     app.state.forwarder = forwarder or HttpxForwarder()
+    # (timestamp, runtimes set) cache so we don't ping the backend on every request.
+    app.state.runtimes_cache = None
 
     def _embedder():
         if app.state.embedder is None:
@@ -141,6 +145,22 @@ def create_app(
             # A backend may have come up after startup — try once more.
             router.select(app.state.backend_choice)
         return router.active_backend
+
+    def _available_runtimes() -> set[str] | None:
+        """Loaded runtimes on the active backend, cached with a 60s TTL.
+
+        Returns ``None`` when no backend is active (no filtering).
+        """
+        active = _active_backend()
+        if active is None:
+            return None
+        cache = app.state.runtimes_cache
+        now = time.monotonic()
+        if cache is not None and (now - cache[0]) < _RUNTIMES_TTL:
+            return cache[1]
+        runtimes = set(active.list_loaded_adapters())
+        app.state.runtimes_cache = (now, runtimes)
+        return runtimes
 
     # -- health -------------------------------------------------------------
     @app.get("/health")
@@ -198,6 +218,7 @@ def create_app(
                     app.state.task_reg,
                     app.state.adapter_reg,
                     _embedder(),
+                    available_runtimes=_available_runtimes(),
                 )
             except ValueError as exc:
                 # Embeddings not initialised, etc.

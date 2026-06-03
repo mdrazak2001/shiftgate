@@ -240,6 +240,10 @@ User query
               └────────────────────────────────┘
 ```
 
+### How routing works
+
+When a backend is active, shiftgate filters candidate adapters to only those actually loaded on that backend. Switch from vLLM to Cerebras and shiftgate automatically picks Cerebras-compatible adapters — no re-registration needed. (When you run `shiftgate route` with no backend running, no filtering is applied, so you still see the full routing preview.)
+
 ---
 
 ## Bring Your Own Models

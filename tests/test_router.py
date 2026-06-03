@@ -307,3 +307,91 @@ class TestRouteFunction:
     def test_hf_adapter_effective_name_falls_back_to_id(self):
         adapter = adapter_from_hf("org/sql-lora", adapter_id="sql-lora")
         assert adapter.effective_backend_name() == "sql-lora"
+
+
+# ---------------------------------------------------------------------------
+# Backend-aware adapter filtering
+# ---------------------------------------------------------------------------
+
+class TestBackendAwareFiltering:
+    def test_filter_excludes_unloaded_runtime(self, synthetic_tasks, adapter_reg):
+        """An adapter whose runtime is not loaded is skipped during selection."""
+        query_emb = np.array([1.0, 0.0, 0.0], dtype=np.float32)  # → task_x → adapter-x
+        ranked = top_k_tasks(query_emb, synthetic_tasks, k=3)
+        # adapter-x is NOT in the loaded set; task_x has only adapter-x → skip it.
+        # No other top task has a loaded adapter either → None.
+        result = select_adapter(ranked, adapter_reg, available_runtimes={"something-else"})
+        assert result.selected_adapter is None
+        assert result.selection_method == "no_adapter_on_active_backend"
+
+    def test_fall_through_to_next_best_task(self, synthetic_tasks, adapter_reg):
+        """When top-1 task's adapter isn't loaded, selection falls through."""
+        query_emb = np.array([1.0, 0.0, 0.0], dtype=np.float32)  # task_x is top
+        ranked = top_k_tasks(query_emb, synthetic_tasks, k=3)
+        # Only adapter-y (task_y) is loaded → fall through from task_x to task_y.
+        result = select_adapter(ranked, adapter_reg, available_runtimes={"adapter-y"})
+        assert result.selected_adapter is not None
+        assert result.selected_adapter.id == "adapter-y"
+        assert result.matched_task.id == "task_y"
+
+    def test_none_preserves_unfiltered_behavior(self, synthetic_tasks, adapter_reg):
+        """available_runtimes=None means no filtering (preview behaviour)."""
+        query_emb = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        ranked = top_k_tasks(query_emb, synthetic_tasks, k=3)
+        result = select_adapter(ranked, adapter_reg, available_runtimes=None)
+        assert result.selected_adapter.id == "adapter-x"
+        assert result.selection_method == "preferred"
+
+    def test_filter_respects_runtime_name(self, tmp_path):
+        """Filtering matches on effective_backend_name (runtime_name when set)."""
+        task = _make_task("task_x", [1, 0, 0], ["sql-lora"])
+        adapter = adapter_from_runtime("sql-lora-vllm", adapter_id="sql-lora")
+        reg = AdapterRegistry(adapters=[adapter], source_path=tmp_path / "a.json")
+        query_emb = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        ranked = top_k_tasks(query_emb, [task], k=1)
+
+        # The registry id "sql-lora" is loaded, but the runtime name is not →
+        # filtering uses the runtime name, so this is NOT viable.
+        miss = select_adapter(ranked, reg, available_runtimes={"sql-lora"})
+        assert miss.selected_adapter is None
+        assert miss.selection_method == "no_adapter_on_active_backend"
+
+        # The runtime name IS loaded → viable.
+        hit = select_adapter(ranked, reg, available_runtimes={"sql-lora-vllm"})
+        assert hit.selected_adapter is not None
+        assert hit.selected_adapter.id == "sql-lora"
+
+    def test_no_linked_adapter_still_reports_no_adapter_for_task(self, tmp_path):
+        """Filtering active but task has no linked adapter at all → for_task reason."""
+        task = _make_task("task_x", [1, 0, 0], adapter_ids=[])
+        reg = AdapterRegistry(adapters=[], source_path=tmp_path / "a.json")
+        query_emb = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        ranked = top_k_tasks(query_emb, [task], k=1)
+        result = select_adapter(ranked, reg, available_runtimes={"anything"})
+        assert result.selected_adapter is None
+        assert result.selection_method == "no_adapter_for_task"
+
+
+class TestRouteFiltering:
+    def test_route_filters_by_available_runtimes(self, task_reg, adapter_reg):
+        """route() passes the filter through and sets the right method on a miss."""
+        from shiftgate.router.router import route
+
+        # python query → task_x → adapter-x. None of the registry's adapters
+        # are loaded on the active backend → no viable adapter anywhere.
+        trace, result = route(
+            "write python code", task_reg, adapter_reg, MockEmbedder(),
+            available_runtimes={"unrelated-runtime"},
+        )
+        assert result.selected_adapter is None
+        assert trace.selected_adapter_id is None
+        assert result.selection_method == "no_adapter_on_active_backend"
+
+    def test_route_none_runtimes_unfiltered(self, task_reg, adapter_reg):
+        from shiftgate.router.router import route
+
+        trace, result = route(
+            "write python code", task_reg, adapter_reg, MockEmbedder(),
+            available_runtimes=None,
+        )
+        assert trace.selected_adapter_id == "adapter-x"

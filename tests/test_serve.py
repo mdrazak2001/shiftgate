@@ -96,6 +96,9 @@ def client(tmp_path, forwarder):
 
     router = BackendRouter()
     router.select("vllm")  # force-select; no availability ping
+    # Report the adapters as "loaded" so backend-aware filtering keeps them.
+    # adapter-x's runtime name is "adapter-x-vllm"; adapter-y has no runtime name.
+    router._vllm.list_loaded_adapters = lambda: ["adapter-x-vllm", "adapter-y"]
 
     app = create_app(
         backend="vllm",
@@ -179,6 +182,7 @@ def test_no_adapter_returns_400(tmp_path, forwarder):
     adapter_reg = AdapterRegistry(adapters=[], source_path=tmp_path / "adapters.json")
     router = BackendRouter()
     router.select("vllm")
+    router._vllm.list_loaded_adapters = lambda: []
     app = create_app(
         backend="vllm",
         task_reg=task_reg,

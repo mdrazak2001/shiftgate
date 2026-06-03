@@ -83,6 +83,19 @@ def _get_embedder():
     return Embedder()
 
 
+def _active_runtimes(backend_router) -> set[str] | None:
+    """Return the set of runtime names loaded on the active backend, or None.
+
+    ``None`` means no backend is active → the router should not filter
+    (preview behaviour).  An empty set means a backend is active but reports no
+    loaded models.
+    """
+    active = backend_router.active_backend
+    if active is None:
+        return None
+    return set(active.list_loaded_adapters())
+
+
 def _auto_link_adapter(adapter: AdapterEntry, task_reg) -> list[str]:
     """Add ``adapter.id`` to the ``preferred_adapters`` of matching task clusters.
 
@@ -464,6 +477,7 @@ def route(
     """
     from shiftgate.feedback import loop as feedback_loop
     from shiftgate.router import router as routing
+    from shiftgate.runtime.backend import BackendRouter
     from shiftgate.utils.display import show_explain_decision, show_routing_decision
 
     task_reg, adapter_reg = _load_registries()
@@ -474,8 +488,15 @@ def route(
 
     embedder = _get_embedder()
 
+    backend_router = BackendRouter()
+    backend_name = backend_router.detect()
+    available_runtimes = _active_runtimes(backend_router)
+
     try:
-        trace, match_result = routing.route(query, task_reg, adapter_reg, embedder, top_k=top_k)
+        trace, match_result = routing.route(
+            query, task_reg, adapter_reg, embedder,
+            top_k=top_k, available_runtimes=available_runtimes,
+        )
     except Exception as exc:
         console.print(f"[red]Routing error:[/red] {exc}")
         raise typer.Exit(1)
@@ -487,7 +508,9 @@ def route(
         trace,
         adapter=adapter,
         task_name=task.name if task else None,
-        backend_name=None,
+        backend_name=backend_name,
+        loaded_runtimes=available_runtimes,
+        selection_method=match_result.selection_method,
     )
 
     if explain:
@@ -524,22 +547,29 @@ def run(
 
     embedder = _get_embedder()
 
+    backend_router = BackendRouter()
+    backend_name = backend_router.detect()
+    available_runtimes = _active_runtimes(backend_router)
+
     try:
-        trace, match_result = routing.route(query, task_reg, adapter_reg, embedder, top_k=top_k)
+        trace, match_result = routing.route(
+            query, task_reg, adapter_reg, embedder,
+            top_k=top_k, available_runtimes=available_runtimes,
+        )
     except Exception as exc:
         console.print(f"[red]Routing error:[/red] {exc}")
         raise typer.Exit(1)
 
     adapter = adapter_reg.get_adapter(trace.selected_adapter_id)
     task = task_reg.get_task(trace.matched_task_id)
-    backend_router = BackendRouter()
-    backend_name = backend_router.detect()
 
     show_routing_decision(
         trace,
         adapter=adapter,
         task_name=task.name if task else None,
         backend_name=backend_name,
+        loaded_runtimes=available_runtimes,
+        selection_method=match_result.selection_method,
     )
 
     if adapter is None:

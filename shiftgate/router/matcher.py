@@ -117,6 +117,7 @@ def top_k_tasks(
 def select_adapter(
     top_tasks: list[TaskMatch],
     adapter_registry,  # AdapterRegistry — avoid circular import with string hint
+    available_runtimes: set[str] | None = None,
 ) -> MatchResult:
     """Select the adapter linked to the best-matching task.
 
@@ -125,15 +126,23 @@ def select_adapter(
     For each top task (highest score first), walk ``preferred_adapters`` then
     ``fallback_adapters`` and collect the adapters that exist in the registry
     (populating ``TaskMatch.candidate_adapters`` for the ``--explain`` view).
-    The first such adapter found, on the highest-scoring task, is selected.
+    The first viable adapter found, on the highest-scoring task, is selected.
+
+    Backend-aware filtering
+    -----------------------
+    When ``available_runtimes`` is provided (the set of model/adapter names
+    actually loaded on the active backend), only adapters whose
+    ``effective_backend_name()`` is in that set are considered viable.  If a
+    task's entire candidate list is filtered out, selection falls through to
+    the next-best task.  When ``available_runtimes`` is ``None`` no filtering
+    happens (the preview behaviour used by ``shiftgate route``).
 
     No silent fallback
     ------------------
     If the matched (top) task has **no** linked adapter in the registry, the
     router must NOT substitute an arbitrary adapter — doing so silently routes,
     e.g., a music query to a SQL adapter and destroys trust.  Instead this
-    returns a ``MatchResult`` with ``selected_adapter=None`` and
-    ``selection_method="no_adapter_for_task"``.
+    returns a ``MatchResult`` with ``selected_adapter=None``.
 
     Parameters
     ----------
@@ -141,39 +150,56 @@ def select_adapter(
         Output of ``top_k_tasks`` (sorted by score descending).
     adapter_registry:
         ``AdapterRegistry`` instance to look up adapter IDs.
+    available_runtimes:
+        Optional set of runtime names loaded on the active backend.  When set,
+        adapters not in the set are skipped during selection.
 
     Returns
     -------
-    ``MatchResult``.  ``selected_adapter`` is ``None`` when no adapter is
-    linked to any of the ranked tasks.  The ``matched_task`` is always the
-    top-scoring task so callers can still report what was matched.
+    ``MatchResult``.  ``selected_adapter`` is ``None`` when no viable adapter is
+    found.  ``selection_method`` is ``"no_adapter_on_active_backend"`` when
+    linked adapters exist but none are loaded on the active backend, otherwise
+    ``"no_adapter_for_task"``.  The ``matched_task`` is always the top-scoring
+    task so callers can still report what was matched.
     """
-    # Populate candidate lists for every task (for the --explain view) and
-    # find the first explicit match in score order.
+    def _is_viable(adapter) -> bool:
+        if available_runtimes is None:
+            return True
+        return adapter.effective_backend_name() in available_runtimes
+
     explicit_result: MatchResult | None = None
+    any_linked_adapter = False  # any task had at least one registered adapter
 
     for tm in top_tasks:
         preferred_ids = list(tm.task.preferred_adapters)
         fallback_ids = list(tm.task.fallback_adapters)
 
+        # Populate candidate_adapters with every registered adapter (for the
+        # --explain view, showing all candidates regardless of runtime).
         for adapter_id in preferred_ids + fallback_ids:
             adapter = adapter_registry.get_adapter(adapter_id)
             if adapter is not None and adapter not in tm.candidate_adapters:
                 tm.candidate_adapters.append(adapter)
 
-        if explicit_result is None and tm.candidate_adapters:
-            method = (
-                "preferred"
-                if tm.candidate_adapters[0].id in tm.task.preferred_adapters
-                else "fallback"
-            )
-            explicit_result = MatchResult(
-                selected_adapter=tm.candidate_adapters[0],
-                matched_task=tm.task,
-                similarity_score=tm.score,
-                all_task_matches=top_tasks,
-                selection_method=method,
-            )
+        if tm.candidate_adapters:
+            any_linked_adapter = True
+
+        if explicit_result is None:
+            viable = [a for a in tm.candidate_adapters if _is_viable(a)]
+            if viable:
+                chosen = viable[0]
+                method = (
+                    "preferred"
+                    if chosen.id in tm.task.preferred_adapters
+                    else "fallback"
+                )
+                explicit_result = MatchResult(
+                    selected_adapter=chosen,
+                    matched_task=tm.task,
+                    similarity_score=tm.score,
+                    all_task_matches=top_tasks,
+                    selection_method=method,
+                )
 
     if explicit_result is not None:
         logger.debug(
@@ -185,19 +211,29 @@ def select_adapter(
         )
         return explicit_result
 
-    # No adapter linked to any ranked task — do NOT guess. Report the matched
-    # task with no adapter so the caller can prompt the user to add one.
+    # No viable adapter across any ranked task. Distinguish "nothing linked at
+    # all" from "linked but not loaded on the active backend".
     top_task = top_tasks[0]
-    logger.info(
-        "No linked adapter for matched task '%s' — refusing to guess.",
-        top_task.task.id,
-    )
+    if available_runtimes is not None and any_linked_adapter:
+        method = "no_adapter_on_active_backend"
+        logger.info(
+            "Linked adapter(s) for task '%s' exist but none are loaded on the "
+            "active backend — refusing to guess.",
+            top_task.task.id,
+        )
+    else:
+        method = "no_adapter_for_task"
+        logger.info(
+            "No linked adapter for matched task '%s' — refusing to guess.",
+            top_task.task.id,
+        )
+
     return MatchResult(
         selected_adapter=None,
         matched_task=top_task.task,
         similarity_score=top_task.score,
         all_task_matches=top_tasks,
-        selection_method="no_adapter_for_task",
+        selection_method=method,
     )
 
 

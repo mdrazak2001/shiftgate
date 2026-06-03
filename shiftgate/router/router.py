@@ -26,6 +26,7 @@ def route(
     adapter_registry: AdapterRegistry,
     embedder: Embedder,
     top_k: int = 3,
+    available_runtimes: set[str] | None = None,
 ) -> tuple[RoutingTrace, MatchResult]:
     """Route a query string to the best matching adapter.
 
@@ -48,6 +49,12 @@ def route(
         ``Embedder`` instance (wraps fastembed singleton).
     top_k:
         Number of top task candidates to consider.  Defaults to 3.
+    available_runtimes:
+        Optional set of runtime names loaded on the active backend.  When set,
+        adapters whose ``effective_backend_name()`` is not in the set are
+        skipped, falling through to the next-best task.  If no viable adapter
+        is found across all top-K tasks, the trace's ``selected_adapter_id`` is
+        ``None`` and ``selection_method`` is ``"no_adapter_on_active_backend"``.
 
     Returns
     -------
@@ -73,7 +80,7 @@ def route(
     query_embedding = embedder.embed(query)
     all_tasks = task_registry.get_all_tasks()
     ranked = top_k_tasks(query_embedding, all_tasks, k=top_k)
-    result = select_adapter(ranked, adapter_registry)
+    result = select_adapter(ranked, adapter_registry, available_runtimes=available_runtimes)
 
     selected_id = result.selected_adapter.id if result.selected_adapter else None
 
