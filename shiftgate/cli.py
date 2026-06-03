@@ -17,6 +17,7 @@ from typing import Annotated, Optional
 
 import typer
 from rich.console import Console
+from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
 
 from shiftgate.registry.schemas import AdapterEntry, TaskCluster
@@ -723,6 +724,63 @@ def doctor() -> None:
         n_with_embeddings=n_with_embeddings,
         unlinked_tasks=unlinked_tasks,
     )
+
+
+# ---------------------------------------------------------------------------
+# shiftgate serve
+# ---------------------------------------------------------------------------
+
+@app.command()
+def serve(
+    port: Annotated[int, typer.Option("--port", help="Port to listen on.")] = 9000,
+    host: Annotated[
+        str,
+        typer.Option(
+            "--host",
+            help="Host to bind. Use 0.0.0.0 to expose on the network (default: localhost only).",
+        ),
+    ] = "127.0.0.1",
+    backend: Annotated[
+        str,
+        typer.Option(
+            "--backend",
+            help="Backend to forward to: auto | ollama | vllm | cerebras.",
+        ),
+    ] = "auto",
+) -> None:
+    """Run an OpenAI-compatible proxy that auto-routes `model="auto"` requests.
+
+    Point any OpenAI client (Cursor, Aider, LangChain, the OpenAI SDK) at this
+    URL and pass ``model="auto"`` to get shiftgate routing for free.
+    """
+    import uvicorn
+
+    from shiftgate.serve import create_app
+
+    try:
+        app_instance = create_app(backend=backend)
+    except Exception as exc:
+        console.print(f"[red]Failed to start serve:[/red] {exc}")
+        raise typer.Exit(1)
+
+    backend_router = app_instance.state.backend_router
+    backend_name = backend_router.active_backend_name or "none detected"
+
+    console.print(
+        Panel(
+            f"[bold green]shiftgate serve[/bold green] listening on "
+            f"[cyan]http://{host}:{port}[/cyan]\n"
+            f"backend: [bold]{backend_name}[/bold]\n\n"
+            "Point your OpenAI client at this URL with "
+            "[bold magenta]model='auto'[/bold magenta]:\n"
+            f"  [dim]base_url=\"http://{host}:{port}/v1\"[/dim]",
+            title="OpenAI-compatible proxy",
+            border_style="green",
+            expand=False,
+        )
+    )
+
+    uvicorn.run(app_instance, host=host, port=port, log_level="info")
 
 
 # ---------------------------------------------------------------------------

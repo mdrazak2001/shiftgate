@@ -76,7 +76,60 @@ shiftgate route "write a python sorting function"
 shiftgate run "write a python sorting function"
 ```
 
-**Essential commands:** `init` · `adapter add` · `route` · `run` · `doctor`
+**Essential commands:** `init` · `adapter add` · `route` · `run` · `doctor` · `serve`
+
+---
+
+## Use as an OpenAI-compatible proxy
+
+`shiftgate serve` exposes the router as a drop-in OpenAI endpoint. Any client that speaks OpenAI can point at it and get auto-routing for free — just pass `model="auto"`.
+
+```bash
+# Start the proxy (defaults to http://127.0.0.1:9000)
+shiftgate serve
+```
+
+```python
+# Use it from any OpenAI client
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:9000/v1", api_key="not-needed")
+client.chat.completions.create(
+    model="auto",  # ← shiftgate picks the right adapter
+    messages=[{"role": "user", "content": "write a sql query"}],
+)
+```
+
+When `model="auto"`, shiftgate routes the request to the best adapter and rewrites `model` to that adapter's backend name before forwarding upstream. The response carries an `X-Shiftgate-Route: <adapter_id> (<score>)` header so you can see what was chosen. Passing any other model id bypasses routing and forwards verbatim. Streaming (`stream: true`) is piped straight through via SSE.
+
+```bash
+shiftgate serve --port 9000 --host 127.0.0.1 --backend auto   # backend: auto | ollama | vllm | cerebras
+```
+
+> Bind defaults to `127.0.0.1` (localhost only). Pass `--host 0.0.0.0` to expose it on your network.
+
+### Drop-in for Cursor / Aider / LangChain
+
+Point each tool's OpenAI base URL at the proxy and use `model="auto"`:
+
+```bash
+# Cursor → Settings → Models → Override OpenAI Base URL
+http://localhost:9000/v1
+
+# Aider
+aider --openai-api-base http://localhost:9000/v1 --openai-api-key not-needed --model auto
+```
+
+```python
+# LangChain
+from langchain_openai import ChatOpenAI
+
+llm = ChatOpenAI(
+    base_url="http://localhost:9000/v1",
+    api_key="not-needed",
+    model="auto",
+)
+```
 
 ---
 
@@ -374,6 +427,7 @@ shiftgate/
 | `shiftgate route "<query>"`                              | Route a query and show the decision — no inference                    |
 | `shiftgate route "<query>" --explain`                    | Full decision tree: task scores, candidates, selection reason         |
 | `shiftgate run "<query>"`                                | Route + run via Ollama or vLLM                                        |
+| `shiftgate serve [--port 9000] [--host …] [--backend …]` | Run an OpenAI-compatible auto-routing proxy                           |
 | `shiftgate doctor`                                       | Full health check: embedder, backend, adapters, task embeddings       |
 | `shiftgate adapter add <hf_repo> [--tags …] [--base …]`  | Register adapter from HuggingFace (metadata only)                     |
 | `shiftgate adapter add <id> --local <path> [--tags …]`   | Register a local adapter path                                         |

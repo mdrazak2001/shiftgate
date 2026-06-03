@@ -73,6 +73,20 @@ class BaseBackend(ABC):
         unreachable — this method is only used for informational verification.
         """
 
+    # -- OpenAI-compatible proxying (used by `shiftgate serve`) --------------
+
+    def openai_base_url(self) -> str:
+        """Return the base URL of the backend's OpenAI-compatible API.
+
+        Ollama and vLLM expose it at ``<base_url>/v1``.  Backends whose
+        ``base_url`` already ends in ``/v1`` (e.g. Cerebras) override this.
+        """
+        return f"{self.base_url}/v1"
+
+    def auth_headers(self) -> dict[str, str]:
+        """Return extra HTTP headers needed to authenticate (empty for local)."""
+        return {}
+
 
 # ---------------------------------------------------------------------------
 # Ollama
@@ -293,6 +307,13 @@ class CerebrasBackend(BaseBackend):
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.api_key}"}
 
+    def openai_base_url(self) -> str:
+        # Cerebras' base_url already includes the /v1 prefix.
+        return self.base_url
+
+    def auth_headers(self) -> dict[str, str]:
+        return self._headers()
+
     def is_available(self) -> bool:
         """Return True only if an API key is set and ``/models`` returns 200.
 
@@ -411,6 +432,30 @@ class BackendRouter:
             return "cerebras"
         self._active = None
         return None
+
+    def select(self, name: str | None) -> str | None:
+        """Force-select a backend by name, or auto-detect when ``None``/``auto``.
+
+        Unlike :meth:`detect`, an explicitly named backend is activated even if
+        an availability ping would fail — the caller asked for it specifically.
+        Returns the active backend name (or ``None`` if auto-detect found none).
+        """
+        if name in (None, "", "auto"):
+            return self.detect()
+        mapping = {
+            "ollama": self._ollama,
+            "vllm": self._vllm,
+            "cerebras": self._cerebras,
+        }
+        if name not in mapping:
+            raise ValueError(f"Unknown backend '{name}'. Choose ollama, vllm, cerebras, or auto.")
+        self._active = mapping[name]
+        return name
+
+    @property
+    def active_backend(self) -> BaseBackend | None:
+        """Return the currently active backend instance (or None)."""
+        return self._active
 
     def generate(self, prompt: str, adapter: AdapterEntry) -> str:
         """Route the prompt to the active backend.

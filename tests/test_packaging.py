@@ -97,6 +97,8 @@ class TestWheelContents:
             "shiftgate/runtime/backend.py",
             "shiftgate/feedback/loop.py",
             "shiftgate/utils/display.py",
+            "shiftgate/serve/__init__.py",
+            "shiftgate/serve/app.py",
         }
         missing = expected - names
         assert not missing, f"wheel is missing modules: {sorted(missing)}"
