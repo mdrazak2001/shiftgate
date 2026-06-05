@@ -34,8 +34,10 @@ from shiftgate.registry.schemas import AdapterEntry
 
 logger = logging.getLogger(__name__)
 
-# Default timeouts (seconds).
-_CONNECT_TIMEOUT = 3.0
+# Health pings and adapter-list probes use a short connect timeout so CLI
+# startup stays snappy when backends are down.  Actual inference uses
+# ``_READ_TIMEOUT`` instead.
+_CONNECT_TIMEOUT = 0.5
 _READ_TIMEOUT = 120.0
 
 
@@ -56,6 +58,9 @@ def effective_backend_name(adapter: AdapterEntry) -> str:
 
 class BaseBackend(ABC):
     """Abstract base for inference backends."""
+
+    def __init__(self) -> None:
+        self._loaded_cache: list[str] | None = None
 
     # Whether this backend speaks the OpenAI ``/v1/chat/completions`` wire
     # format.  Defaults to True so existing custom backends keep working with
@@ -78,6 +83,17 @@ class BaseBackend(ABC):
         Must use a short timeout and silently return ``[]`` if the backend is
         unreachable — this method is only used for informational verification.
         """
+
+    def list_loaded_adapters_cached(self) -> list[str]:
+        """Return :meth:`list_loaded_adapters`, caching for this backend instance.
+
+        The cache lives for the lifetime of one ``BackendRouter`` / CLI
+        invocation — sufficient for ``doctor`` and routing without repeat
+        round-trips.  :meth:`verify_adapter` still calls the uncached method.
+        """
+        if self._loaded_cache is None:
+            self._loaded_cache = self.list_loaded_adapters()
+        return self._loaded_cache
 
     # -- OpenAI-compatible proxying (used by `shiftgate serve`) --------------
 
@@ -119,6 +135,7 @@ class OllamaBackend(BaseBackend):
     """
 
     def __init__(self, base_url: str = "http://localhost:11434") -> None:
+        super().__init__()
         self.base_url = base_url.rstrip("/")
 
     def is_available(self) -> bool:
@@ -210,6 +227,7 @@ class VLLMBackend(BaseBackend):
     """
 
     def __init__(self, base_url: str = "http://localhost:8000") -> None:
+        super().__init__()
         self.base_url = base_url.rstrip("/")
 
     def is_available(self) -> bool:
@@ -307,6 +325,7 @@ class CerebrasBackend(BaseBackend):
     """
 
     def __init__(self, api_key: str | None = None) -> None:
+        super().__init__()
         self.base_url = "https://api.cerebras.ai/v1"
         self.api_key = api_key or os.getenv("CEREBRAS_API_KEY")
 
@@ -429,6 +448,7 @@ class CloudflareBackend(BaseBackend):
         account_id: str | None = None,
         api_token: str | None = None,
     ) -> None:
+        super().__init__()
         self.account_id = account_id or os.getenv("CLOUDFLARE_ACCOUNT_ID")
         self.api_token = api_token or os.getenv("CLOUDFLARE_API_TOKEN")
         self.base_url = (
@@ -598,10 +618,14 @@ class BackendRouter:
         if self._vllm.is_available():
             self._active = self._vllm
             return "vllm"
-        if self._cerebras.is_available():
+        if self._cerebras.api_key and self._cerebras.is_available():
             self._active = self._cerebras
             return "cerebras"
-        if self._cloudflare.is_available():
+        if (
+            self._cloudflare.account_id
+            and self._cloudflare.api_token
+            and self._cloudflare.is_available()
+        ):
             self._active = self._cloudflare
             return "cloudflare"
         self._active = None

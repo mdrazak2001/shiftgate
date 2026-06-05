@@ -133,7 +133,7 @@ def _active_runtimes(backend_router, adapter_reg=None) -> set[str] | None:
     if active is None:
         return None
 
-    usable = set(active.list_loaded_adapters())
+    usable = set(active.list_loaded_adapters_cached())
 
     from shiftgate.runtime.backend import CloudflareBackend
 

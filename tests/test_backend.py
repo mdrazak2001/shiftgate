@@ -426,3 +426,41 @@ class TestCloudflareBackend:
         monkeypatch.setattr(router._cerebras, "is_available", lambda: False)
         monkeypatch.setattr(router._cloudflare, "is_available", lambda: True)
         assert router.detect() == "vllm"
+
+    def test_detect_skips_cloud_http_without_credentials(self, monkeypatch):
+        """No cloud env vars and no local backends → zero HTTP calls."""
+        monkeypatch.delenv("CEREBRAS_API_KEY", raising=False)
+        monkeypatch.delenv("CLOUDFLARE_ACCOUNT_ID", raising=False)
+        monkeypatch.delenv("CLOUDFLARE_API_TOKEN", raising=False)
+
+        def boom(*args, **kwargs):
+            raise AssertionError("httpx must not be called when no backends are configured")
+
+        monkeypatch.setattr("shiftgate.runtime.backend.httpx.get", boom)
+        monkeypatch.setattr("shiftgate.runtime.backend.httpx.post", boom)
+
+        router = BackendRouter(
+            cerebras_api_key=None,
+            cloudflare_account_id=None,
+            cloudflare_api_token=None,
+        )
+        monkeypatch.setattr(router._ollama, "is_available", lambda: False)
+        monkeypatch.setattr(router._vllm, "is_available", lambda: False)
+
+        assert router.detect() is None
+        assert router.active_backend_name is None
+
+    def test_list_loaded_adapters_cached_fetches_once(self, monkeypatch):
+        calls = {"n": 0}
+
+        def fake_get(url, headers, timeout):
+            calls["n"] += 1
+            return _CFResp({"result": [{"name": "a"}]})
+
+        monkeypatch.setattr("shiftgate.runtime.backend.httpx.get", fake_get)
+        backend = CloudflareBackend(account_id="acc", api_token="tok")
+
+        assert backend.list_loaded_adapters_cached() == ["a"]
+        assert backend.list_loaded_adapters_cached() == ["a"]
+        # /finetunes + /finetunes/public on first uncached call only.
+        assert calls["n"] == 2
