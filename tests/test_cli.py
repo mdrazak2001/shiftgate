@@ -39,6 +39,9 @@ class _FakeActiveBackend:
     def list_loaded_adapters(self):
         return ["gpt-oss-120b"]
 
+    def list_loaded_adapters_cached(self):
+        return self.list_loaded_adapters()
+
 
 class _FakeBackendRouter:
     """Stand-in for BackendRouter with a fixed active backend + capture."""
