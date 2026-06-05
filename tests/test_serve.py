@@ -206,3 +206,98 @@ def test_no_adapter_returns_400(tmp_path, forwarder):
 def test_missing_model_field_returns_400(client):
     r = client.post("/v1/chat/completions", json={"messages": []})
     assert r.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Non-OpenAI-compatible backend (Cloudflare) path
+# ---------------------------------------------------------------------------
+
+class MockCloudflareBackend:
+    """Non-OpenAI backend: returns plain text from generate()."""
+
+    is_openai_compatible = False
+    base_url = "https://api.cloudflare.com/client/v4/accounts/acc/ai"
+
+    def __init__(self):
+        self.last_prompt = None
+        self.last_adapter = None
+
+    def is_available(self):
+        return True
+
+    def list_loaded_adapters(self):
+        return ["cf-runtime"]
+
+    def generate(self, prompt, adapter, **kwargs):
+        self.last_prompt = prompt
+        self.last_adapter = adapter
+        return "cloudflare says hi"
+
+
+@pytest.fixture()
+def cf_client(tmp_path):
+    tasks = [_task("task_x", [1, 0, 0], ["cf-lora"])]
+    task_reg = TaskRegistry(tasks=tasks, source_path=tmp_path / "tasks.json")
+    cf_adapter = AdapterEntry(
+        id="cf-lora",
+        name="CF LoRA",
+        base_model="@cf/mistral/mistral-7b-instruct-v0.2-lora",
+        task_tags=[],
+        runtime_name="cf-runtime",
+        status="linked",
+    )
+    adapter_reg = AdapterRegistry(
+        adapters=[cf_adapter], source_path=tmp_path / "adapters.json"
+    )
+
+    router = BackendRouter()
+    mock = MockCloudflareBackend()
+    # Swap in the mock so the router treats it as the cloudflare backend.
+    router._cloudflare = mock
+    router.select("cloudflare")
+
+    app = create_app(
+        backend="cloudflare",
+        task_reg=task_reg,
+        adapter_reg=adapter_reg,
+        embedder=FakeEmbedder(),
+        backend_router=router,
+    )
+    return TestClient(app)
+
+
+def test_cloudflare_auto_wraps_response_in_openai_envelope(cf_client):
+    r = cf_client.post(
+        "/v1/chat/completions",
+        json={"model": "auto", "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert r.status_code == 200
+    data = r.json()
+    assert data["object"] == "chat.completion"
+    assert data["choices"][0]["message"]["role"] == "assistant"
+    assert data["choices"][0]["message"]["content"] == "cloudflare says hi"
+    assert data["choices"][0]["finish_reason"] == "stop"
+
+
+def test_cloudflare_route_header_set(cf_client):
+    r = cf_client.post(
+        "/v1/chat/completions",
+        json={"model": "auto", "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert r.status_code == 200
+    header = r.headers.get("X-Shiftgate-Route")
+    assert header is not None
+    assert header.startswith("cf-lora (")
+
+
+def test_cloudflare_streaming_returns_501(cf_client):
+    r = cf_client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "auto",
+            "stream": True,
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    )
+    assert r.status_code == 501
+    assert r.json()["error"] == "streaming not yet supported for backend: cloudflare"

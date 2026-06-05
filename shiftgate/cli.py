@@ -52,12 +52,47 @@ def _main(
             ),
         ),
     ] = None,
+    cf_account_id: Annotated[
+        Optional[str],
+        typer.Option(
+            "--cf-account-id",
+            help="Cloudflare account ID. Sets CLOUDFLARE_ACCOUNT_ID for this run.",
+        ),
+    ] = None,
+    cf_api_token: Annotated[
+        Optional[str],
+        typer.Option(
+            "--cf-api-token",
+            help="Cloudflare API token. Sets CLOUDFLARE_API_TOKEN for this run.",
+        ),
+    ] = None,
+    verbose: Annotated[
+        bool,
+        typer.Option(
+            "--verbose",
+            "-v",
+            help="Enable DEBUG logging (shows routing internals like runtime filtering).",
+        ),
+    ] = False,
 ) -> None:
     """Global options applied before any command runs."""
-    if cerebras_key:
-        import os
+    import os
 
+    if cerebras_key:
         os.environ["CEREBRAS_API_KEY"] = cerebras_key
+    if cf_account_id:
+        os.environ["CLOUDFLARE_ACCOUNT_ID"] = cf_account_id
+    if cf_api_token:
+        os.environ["CLOUDFLARE_API_TOKEN"] = cf_api_token
+
+    if verbose:
+        import logging
+
+        logging.basicConfig(
+            level=logging.DEBUG,
+            format="%(levelname)s [%(name)s] %(message)s",
+        )
+        logging.getLogger("shiftgate").setLevel(logging.DEBUG)
 
 
 # ---------------------------------------------------------------------------
@@ -83,17 +118,33 @@ def _get_embedder():
     return Embedder()
 
 
-def _active_runtimes(backend_router) -> set[str] | None:
-    """Return the set of runtime names loaded on the active backend, or None.
+def _active_runtimes(backend_router, adapter_reg=None) -> set[str] | None:
+    """Return the set of runtime names usable on the active backend, or None.
 
     ``None`` means no backend is active → the router should not filter
     (preview behaviour).  An empty set means a backend is active but reports no
-    loaded models.
+    usable models.
+
+    For Cloudflare, base models are always available without any finetune
+    upload, so every registered ``@cf/`` adapter that has no finetune
+    ``runtime_name`` is considered usable (base-model inference).
     """
     active = backend_router.active_backend
     if active is None:
         return None
-    return set(active.list_loaded_adapters())
+
+    usable = set(active.list_loaded_adapters())
+
+    from shiftgate.runtime.backend import CloudflareBackend
+
+    if isinstance(active, CloudflareBackend) and adapter_reg is not None:
+        for adapter in adapter_reg.list_adapters():
+            is_cf_base = (adapter.base_model or "").startswith("@cf/")
+            has_finetune = bool((adapter.runtime_name or "").strip())
+            if is_cf_base and not has_finetune:
+                usable.add(adapter.effective_backend_name())
+
+    return usable
 
 
 def _auto_link_adapter(adapter: AdapterEntry, task_reg) -> list[str]:
@@ -160,9 +211,15 @@ def _verify_runtime_adapter(adapter: AdapterEntry, adapter_reg) -> None:
     """
     from shiftgate.runtime.backend import BackendRouter
 
+    # A Cloudflare base model (@cf/...) implies this is a Cloudflare adapter —
+    # prefer the Cloudflare backend for verification when it's reachable.
+    is_cloudflare = (adapter.base_model or "").startswith("@cf/")
+
     try:
         with console.status("[cyan]Verifying adapter against running backend…[/cyan]"):
             router = BackendRouter()
+            if is_cloudflare and router._cloudflare.is_available():
+                router.select("cloudflare")
             is_loaded, backend_name = router.verify_adapter(adapter)
     except Exception as exc:  # pragma: no cover - defensive, should not happen
         logger_msg = f"verification error: {exc}"
@@ -179,9 +236,14 @@ def _verify_runtime_adapter(adapter: AdapterEntry, adapter_reg) -> None:
         console.print(f"   [green]Backend: {backend_name} ✓ verified[/green]")
     else:
         adapter.verified = False
+        hint = (
+            "— upload it with `npx wrangler ai finetune create`"
+            if backend_name == "cloudflare"
+            else "— did you pass --lora-modules?"
+        )
         console.print(
             f"   [yellow]Backend: {backend_name} ⚠ runtime '{runtime}' not loaded "
-            "— did you pass --lora-modules?[/yellow]"
+            f"{hint}[/yellow]"
         )
 
     adapter_reg.save()
@@ -207,12 +269,23 @@ def init() -> None:
     task_reg = TaskRegistry.load()
 
     if task_reg.embeddings_ready():
-        console.print("[dim]Embeddings already computed. Skipping (delete embeddings_cache.npy to force refresh).[/dim]")
+        console.print(
+            "[dim]Task centroids already computed — skipping re-embed "
+            "(delete embeddings_cache.npy to force refresh).[/dim]"
+        )
     else:
         console.print("[cyan]Computing task embeddings (first run — model download may take a moment)…[/cyan]")
         embedder = _get_embedder()
         task_reg.compute_embeddings(embedder)
-        console.print("[green]✓[/green]  Embeddings computed.")
+        console.print("[green]OK[/green]  Embeddings computed.")
+
+    # Centroids can exist while the ONNX runtime model is missing (e.g. after
+    # deleting fastembed_cache).  Always warm-load so routing works.
+    console.print("[cyan]Loading embedder model (one-time ~30 MB download if not cached)…[/cyan]")
+    from shiftgate.router.embedder import warm_up
+
+    dim = warm_up()
+    console.print(f"[green]OK[/green]  Embedder ready (dim={dim}).")
 
     task_reg.save()
     console.print(f"[green]✓[/green]  Task registry saved to {shiftgate_dir}")
@@ -301,6 +374,7 @@ def adapter_add(
     """
     from shiftgate.registry.adapter_registry import (
         AdapterRegistry,
+        adapter_from_base_model,
         adapter_from_hf,
         adapter_from_local,
         adapter_from_runtime,
@@ -347,12 +421,22 @@ def adapter_add(
                 **shared_kwargs,
             )
 
-    # --- Ambiguous: no '/', no --local, no --runtime ---
+    # --- Mode D: Cloudflare base model (always available, no finetune) ---
+    elif (base or "").startswith("@cf/"):
+        base_model_kwargs = {k: v for k, v in shared_kwargs.items() if k != "base_model"}
+        adapter = adapter_from_base_model(
+            base_model=base,
+            adapter_id=adapter_id or identifier,
+            **base_model_kwargs,
+        )
+
+    # --- Ambiguous: no '/', no --local, no --runtime, no @cf/ base ---
     else:
         console.print(
             f"[red]Error:[/red] '{identifier}' doesn't look like a HuggingFace repo ID (missing '/').\n"
-            "  Use [cyan]--local /path/to/adapter[/cyan] to register a local adapter, or\n"
-            "  use [cyan]--runtime <backend-name>[/cyan] for a runtime-registered adapter."
+            "  Use [cyan]--local /path/to/adapter[/cyan] to register a local adapter,\n"
+            "  use [cyan]--runtime <backend-name>[/cyan] for a runtime-registered adapter, or\n"
+            "  use [cyan]--base @cf/...[/cyan] for a Cloudflare Workers AI base model."
         )
         raise typer.Exit(1)
 
@@ -363,6 +447,11 @@ def adapter_add(
     # has it loaded. Purely informational — never fails the add command.
     if adapter.runtime_name:
         _verify_runtime_adapter(adapter, adapter_reg)
+    elif (adapter.base_model or "").startswith("@cf/"):
+        console.print(
+            "   [green]Backend:[/green] cloudflare "
+            "[green]✓[/green] base model is always available (no upload needed)"
+        )
 
 
 @adapter_app.command("list")
@@ -490,7 +579,7 @@ def route(
 
     backend_router = BackendRouter()
     backend_name = backend_router.detect()
-    available_runtimes = _active_runtimes(backend_router)
+    available_runtimes = _active_runtimes(backend_router, adapter_reg)
 
     try:
         trace, match_result = routing.route(
@@ -549,7 +638,7 @@ def run(
 
     backend_router = BackendRouter()
     backend_name = backend_router.detect()
-    available_runtimes = _active_runtimes(backend_router)
+    available_runtimes = _active_runtimes(backend_router, adapter_reg)
 
     try:
         trace, match_result = routing.route(
@@ -716,9 +805,11 @@ def doctor() -> None:
         router = BackendRouter()
         backend_name = router.detect()
         backend_url = router.active_backend_url
-        loaded_adapters: list[str] = []
+        loaded_adapters: set[str] = set()
         if backend_name is not None and router._active is not None:
-            loaded_adapters = router._active.list_loaded_adapters()
+            # Cloudflare base models are always available, so use the same
+            # usable-runtime computation the router uses when filtering.
+            loaded_adapters = _active_runtimes(router, adapter_reg) or set()
 
     # --- 3. Per-adapter runtime availability ---
     adapter_rows = []
@@ -774,7 +865,7 @@ def serve(
         str,
         typer.Option(
             "--backend",
-            help="Backend to forward to: auto | ollama | vllm | cerebras.",
+            help="Backend to forward to: auto | ollama | vllm | cerebras | cloudflare.",
         ),
     ] = "auto",
 ) -> None:

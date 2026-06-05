@@ -146,6 +146,11 @@ def show_routing_decision(
         if source != "—":
             adapter_text.append(f"\n  {source}", style="dim blue")
         grid.add_row("Adapter", adapter_text)
+        runtime = (adapter.runtime_name or "").strip()
+        if runtime:
+            grid.add_row("LoRA", Text(runtime, style="dim cyan"))
+        else:
+            grid.add_row("LoRA", Text("base-model only", style="dim"))
     else:
         grid.add_row("Adapter", Text(str(trace.selected_adapter_id), style="bold magenta"))
 

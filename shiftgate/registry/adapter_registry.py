@@ -244,6 +244,32 @@ def adapter_from_runtime(
     )
 
 
+def adapter_from_base_model(
+    base_model: str,
+    *,
+    adapter_id: str,
+    name: str | None = None,
+    tags: list[str] | None = None,
+    description: str | None = None,
+    benchmark_score: float | None = None,
+) -> AdapterEntry:
+    """Build an AdapterEntry that routes to a base model with no finetune.
+
+    Used for backends whose base models are always available without any
+    upload (e.g. Cloudflare Workers AI ``@cf/`` models).  ``runtime_name`` is
+    left unset so the backend runs the base model directly.
+    """
+    slug = _slugify(adapter_id)
+    return AdapterEntry(
+        id=slug,
+        name=name or slug.replace("-", " ").title(),
+        base_model=base_model,
+        task_tags=list(tags or []),
+        description=description or f"Base model: {base_model}",
+        benchmark_score=benchmark_score,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------

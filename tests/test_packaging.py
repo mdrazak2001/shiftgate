@@ -168,10 +168,16 @@ class TestWheelInstall:
             script = venv_dir / "bin" / "shiftgate"
         assert script.exists(), f"console script not installed at {script}"
 
+        # Force UTF-8 decoding: Rich help output contains Unicode glyphs that
+        # crash the default cp1252 reader on Windows.
+        env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
         result = subprocess.run(
             [str(script), "--help"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
         )
         assert result.returncode == 0, (
             f"`shiftgate --help` failed (rc={result.returncode}).\n"

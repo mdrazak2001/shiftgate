@@ -320,9 +320,42 @@ shiftgate adapter add llama3.1-8b --runtime llama3.1-8b --tags general --base ll
 shiftgate run "write a python sorting function"
 ```
 
-shiftgate auto-detects backends in the order **Ollama → vLLM → Cerebras**, so local backends always win and Cerebras is used only when no local backend is running.
+shiftgate auto-detects backends in the order **Ollama → vLLM → Cerebras → Cloudflare**, so local backends always win and the cloud backends are used only when no local backend is running.
 
 > **Honest status:** shiftgate routes to Cerebras' base-model inference today. When Cerebras Multi-LoRA goes public, register your adapter with `--runtime <cerebras-lora-id>` and it just works — no shiftgate update needed.
+
+### Option 5 — Cloudflare Workers AI (cloud, LoRA-native)
+
+[Cloudflare Workers AI](https://developers.cloudflare.com/workers-ai/) serves your own LoRA finetunes on top of supported base models.
+
+```bash
+# 1. Upload your LoRA to Cloudflare (one-time)
+npx wrangler ai finetune create @cf/mistral/mistral-7b-instruct-v0.2-lora my-sql-lora ./adapter-folder
+
+# 2. Set credentials
+export CLOUDFLARE_ACCOUNT_ID=...
+export CLOUDFLARE_API_TOKEN=...
+
+# 3. Register in shiftgate — note --base is the Cloudflare model name
+shiftgate adapter add my-sql-lora \
+  --runtime my-sql-lora \
+  --base @cf/mistral/mistral-7b-instruct-v0.2-lora \
+  --tags sql
+
+# 4. Run
+shiftgate run "write a sql join query"
+```
+
+You can also pass credentials per-run with the `--cf-account-id` and `--cf-api-token` global flags.
+
+**Architectural difference (handled transparently):** Cloudflare keeps the base model in the URL and accepts the LoRA name as a separate `lora` field — not as the `model` value like vLLM/Cerebras. shiftgate handles this transparently; your routing logic doesn't change. The `--base` you register **must** be a Cloudflare model name starting with `@cf/`.
+
+**Limitations** (from [Cloudflare's docs](https://developers.cloudflare.com/workers-ai/features/fine-tunes/)):
+
+- Up to **100 LoRAs** per account.
+- LoRA file must be **< 300 MB**.
+- Must be trained with rank **r ≤ 8** (up to 32 on some models).
+- **Streaming is not yet supported** through shiftgate for Cloudflare — you get a single response. (Streaming requests to `shiftgate serve` against Cloudflare return HTTP 501.)
 
 ---
 

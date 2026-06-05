@@ -80,6 +80,15 @@ def route(
     query_embedding = embedder.embed(query)
     all_tasks = task_registry.get_all_tasks()
     ranked = top_k_tasks(query_embedding, all_tasks, k=top_k)
+
+    if available_runtimes is not None:
+        logger.debug(
+            "filtering adapters to backend runtimes: %s",
+            sorted(available_runtimes),
+        )
+    else:
+        logger.debug("no active backend — adapter runtime filtering disabled")
+
     result = select_adapter(ranked, adapter_registry, available_runtimes=available_runtimes)
 
     selected_id = result.selected_adapter.id if result.selected_adapter else None

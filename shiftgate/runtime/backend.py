@@ -57,6 +57,12 @@ def effective_backend_name(adapter: AdapterEntry) -> str:
 class BaseBackend(ABC):
     """Abstract base for inference backends."""
 
+    # Whether this backend speaks the OpenAI ``/v1/chat/completions`` wire
+    # format.  Defaults to True so existing custom backends keep working with
+    # the serve proxy's raw-forwarding path.  Backends with a bespoke API
+    # (e.g. Cloudflare Workers AI) override this to False.
+    is_openai_compatible: bool = True
+
     @abstractmethod
     def is_available(self) -> bool:
         """Return True if the backend can be reached."""
@@ -394,14 +400,173 @@ class CerebrasBackend(BaseBackend):
 
 
 # ---------------------------------------------------------------------------
+# Cloudflare Workers AI (cloud, NOT OpenAI-compatible)
+# ---------------------------------------------------------------------------
+
+class CloudflareBackend(BaseBackend):
+    """Thin httpx client for Cloudflare Workers AI inference with LoRA.
+
+    Cloudflare's API is architecturally different from vLLM/Cerebras:
+
+    * The **base model** lives in the URL path
+      (``/ai/run/@cf/mistral/mistral-7b-instruct-v0.2-lora``).
+    * The **LoRA name** is a separate ``lora`` field in the request body — not
+      the ``model`` value.
+    * The response is wrapped in ``{"result": {"response": ...}, "success": ...}``
+      and is NOT OpenAI-compatible, so it needs translation.
+
+    Auth uses ``Authorization: Bearer {CLOUDFLARE_API_TOKEN}`` and requires a
+    ``CLOUDFLARE_ACCOUNT_ID``.  Both can be passed explicitly or read from env.
+
+    Reference: https://developers.cloudflare.com/workers-ai/
+    """
+
+    # Cloudflare has a bespoke request/response shape — not OpenAI-compatible.
+    is_openai_compatible: bool = False
+
+    def __init__(
+        self,
+        account_id: str | None = None,
+        api_token: str | None = None,
+    ) -> None:
+        self.account_id = account_id or os.getenv("CLOUDFLARE_ACCOUNT_ID")
+        self.api_token = api_token or os.getenv("CLOUDFLARE_API_TOKEN")
+        self.base_url = (
+            f"https://api.cloudflare.com/client/v4/accounts/{self.account_id}/ai"
+        )
+
+    def _headers(self) -> dict[str, str]:
+        return {"Authorization": f"Bearer {self.api_token}"}
+
+    def is_available(self) -> bool:
+        """Return True only if both credentials are set and ``/finetunes`` 200s.
+
+        No network call is made when either credential is missing.
+        """
+        if not (self.account_id and self.api_token):
+            return False
+        try:
+            r = httpx.get(
+                f"{self.base_url}/finetunes",
+                headers=self._headers(),
+                timeout=_CONNECT_TIMEOUT,
+            )
+            return r.status_code == 200
+        except Exception:
+            return False
+
+    def list_loaded_adapters(self) -> list[str]:
+        """Return finetune names available on the account (private + public).
+
+        Merges ``/finetunes`` (user uploads) with ``/finetunes/public``
+        (Cloudflare-hosted LoRAs like ``cf-public-magicoder``).  Cloudflare's
+        ``result`` may be a flat list or a list-of-lists; both are handled.
+        Silently returns ``[]`` if credentials are missing or the API is
+        unreachable.
+        """
+        if not (self.account_id and self.api_token):
+            return []
+        names: list[str] = []
+        for path in ("/finetunes", "/finetunes/public"):
+            try:
+                r = httpx.get(
+                    f"{self.base_url}{path}",
+                    headers=self._headers(),
+                    timeout=_CONNECT_TIMEOUT,
+                )
+                r.raise_for_status()
+                names.extend(self._extract_finetune_names(r.json().get("result", [])))
+            except Exception as exc:
+                logger.debug("Cloudflare list_loaded_adapters %s failed: %s", path, exc)
+        # Preserve order while deduplicating (private upload wins over public).
+        return list(dict.fromkeys(names))
+
+    @staticmethod
+    def _extract_finetune_names(result) -> list[str]:
+        """Pull ``name`` fields from a flat list or a list-of-lists of finetunes."""
+        if not isinstance(result, list):
+            return []
+        # Flatten one level if Cloudflare wrapped the list in result[0].
+        items: list = []
+        for entry in result:
+            if isinstance(entry, list):
+                items.extend(entry)
+            else:
+                items.append(entry)
+        return [it["name"] for it in items if isinstance(it, dict) and "name" in it]
+
+    def generate(
+        self,
+        prompt: str,
+        adapter: AdapterEntry,
+        *,
+        lora_name: str | None = None,
+        system_prompt: str = "You are a helpful assistant.",
+    ) -> str:
+        """Generate text via Cloudflare's ``/ai/run/{base_model}`` endpoint.
+
+        The base model comes from ``adapter.base_model`` and MUST be a
+        Cloudflare-prefixed model name (``@cf/...``).  The LoRA name is sent as
+        the ``lora`` body field (an explicit ``lora_name`` override wins).
+        """
+        base_model = (adapter.base_model or "").strip()
+        if not base_model.startswith("@cf/"):
+            raise BackendError(
+                "Cloudflare backend requires a Cloudflare base model name. "
+                f"Adapter '{adapter.id}' has base_model='{adapter.base_model or ''}'. "
+                "Re-register it with a Cloudflare model, e.g.:\n"
+                f"  shiftgate adapter add {adapter.id} --runtime {effective_backend_name(adapter)} "
+                "--base @cf/mistral/mistral-7b-instruct-v0.2-lora --tags <task>"
+            )
+
+        # `lora` is only sent when the adapter names an actual finetune
+        # (explicit lora_name override, or a non-empty runtime_name).  When no
+        # finetune is named the request runs the base model directly — the
+        # same as calling Cloudflare with no `lora` field.
+        lora = lora_name or ((adapter.runtime_name or "").strip() or None)
+        payload: dict = {
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt},
+            ],
+            "raw": True,
+        }
+        if lora:
+            payload["lora"] = lora
+
+        logger.debug(
+            "Cloudflare generate: base_model=%s lora=%s", base_model, lora or "(base model)"
+        )
+        try:
+            r = httpx.post(
+                f"{self.base_url}/run/{base_model}",
+                json=payload,
+                headers=self._headers(),
+                timeout=_READ_TIMEOUT,
+            )
+            r.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise BackendError(f"Cloudflare request failed: {exc}") from exc
+
+        data = r.json()
+        if not data.get("success", False):
+            errors = data.get("errors", [])
+            raise BackendError(f"Cloudflare inference failed: {errors}")
+        try:
+            return data["result"]["response"]
+        except (KeyError, TypeError) as exc:
+            raise BackendError(f"Unexpected Cloudflare response format: {data}") from exc
+
+
+# ---------------------------------------------------------------------------
 # BackendRouter — auto-detects which backend is live
 # ---------------------------------------------------------------------------
 
 class BackendRouter:
     """Detects and delegates to whichever backend is running.
 
-    Priority: Ollama → vLLM → Cerebras (local backends first, cloud as
-    fallback).  If none is available, calls to ``generate`` raise
+    Priority: Ollama → vLLM → Cerebras → Cloudflare (local backends first,
+    cloud as fallback).  If none is available, calls to ``generate`` raise
     ``NoBackendError`` with a helpful message.
     """
 
@@ -410,16 +575,22 @@ class BackendRouter:
         ollama_url: str = "http://localhost:11434",
         vllm_url: str = "http://localhost:8000",
         cerebras_api_key: str | None = None,
+        cloudflare_account_id: str | None = None,
+        cloudflare_api_token: str | None = None,
     ) -> None:
         self._ollama = OllamaBackend(ollama_url)
         self._vllm = VLLMBackend(vllm_url)
         self._cerebras = CerebrasBackend(cerebras_api_key)
+        self._cloudflare = CloudflareBackend(
+            cloudflare_account_id, cloudflare_api_token
+        )
         self._active: BaseBackend | None = None
 
     def detect(self) -> str | None:
         """Probe backends and return the name of the first that responds.
 
-        Returns ``"ollama"``, ``"vllm"``, ``"cerebras"``, or ``None``.
+        Returns ``"ollama"``, ``"vllm"``, ``"cerebras"``, ``"cloudflare"``, or
+        ``None``.
         """
         if self._ollama.is_available():
             self._active = self._ollama
@@ -430,6 +601,9 @@ class BackendRouter:
         if self._cerebras.is_available():
             self._active = self._cerebras
             return "cerebras"
+        if self._cloudflare.is_available():
+            self._active = self._cloudflare
+            return "cloudflare"
         self._active = None
         return None
 
@@ -446,9 +620,13 @@ class BackendRouter:
             "ollama": self._ollama,
             "vllm": self._vllm,
             "cerebras": self._cerebras,
+            "cloudflare": self._cloudflare,
         }
         if name not in mapping:
-            raise ValueError(f"Unknown backend '{name}'. Choose ollama, vllm, cerebras, or auto.")
+            raise ValueError(
+                f"Unknown backend '{name}'. "
+                "Choose ollama, vllm, cerebras, cloudflare, or auto."
+            )
         self._active = mapping[name]
         return name
 
@@ -475,7 +653,8 @@ class BackendRouter:
                 "  • Start Ollama  : ollama serve\n"
                 "  • Start vLLM    : python -m vllm.entrypoints.openai.api_server "
                 "--model <base_model> --enable-lora\n"
-                "  • Use Cerebras  : export CEREBRAS_API_KEY=csk-...\n\n"
+                "  • Use Cerebras  : export CEREBRAS_API_KEY=csk-...\n"
+                "  • Use Cloudflare: export CLOUDFLARE_ACCOUNT_ID=... CLOUDFLARE_API_TOKEN=...\n\n"
                 "shiftgate can route queries without a backend. "
                 "Use `shiftgate route` to see routing decisions without inference."
             )
@@ -483,13 +662,15 @@ class BackendRouter:
 
     @property
     def active_backend_name(self) -> str | None:
-        """Return 'ollama', 'vllm', or None depending on what was detected."""
+        """Return 'ollama', 'vllm', 'cerebras', 'cloudflare', or None."""
         if self._active is self._ollama:
             return "ollama"
         if self._active is self._vllm:
             return "vllm"
         if self._active is self._cerebras:
             return "cerebras"
+        if self._active is self._cloudflare:
+            return "cloudflare"
         return None
 
     @property
@@ -518,6 +699,15 @@ class BackendRouter:
             self.detect()
         if self._active is None:
             return (False, None)
+
+        # Cloudflare base models are always available without any upload.  A
+        # Cloudflare adapter with a @cf/ base model and no finetune runtime name
+        # is therefore always runnable (base-model inference).
+        if isinstance(self._active, CloudflareBackend):
+            is_cf_base = (adapter.base_model or "").startswith("@cf/")
+            has_finetune = bool((adapter.runtime_name or "").strip())
+            if is_cf_base and not has_finetune:
+                return (True, "cloudflare")
 
         target = effective_backend_name(adapter)
         loaded = self._active.list_loaded_adapters()

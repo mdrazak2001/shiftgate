@@ -23,14 +23,17 @@ from __future__ import annotations
 
 import logging
 import time
+import uuid
 from typing import Any, AsyncIterator, Optional
 
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from sse_starlette.sse import EventSourceResponse
+from starlette.concurrency import run_in_threadpool
 
 from shiftgate.runtime.backend import (
+    BackendError,
     BackendRouter,
     BaseBackend,
     effective_backend_name,
@@ -75,6 +78,27 @@ class HttpxForwarder:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _openai_envelope(text: str, model: str) -> dict[str, Any]:
+    """Wrap a plain text completion in an OpenAI chat.completion response shape.
+
+    Used to translate non-OpenAI backends (e.g. Cloudflare Workers AI) into a
+    response any OpenAI client understands.
+    """
+    return {
+        "id": f"chatcmpl-{uuid.uuid4().hex}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": text},
+                "finish_reason": "stop",
+            }
+        ],
+    }
+
 
 def _last_user_message(messages: list[dict[str, Any]]) -> str | None:
     """Return the content of the last user message, or None."""
@@ -159,6 +183,19 @@ def create_app(
         if cache is not None and (now - cache[0]) < _RUNTIMES_TTL:
             return cache[1]
         runtimes = set(active.list_loaded_adapters())
+
+        # Cloudflare base models are always available without any finetune
+        # upload, so every registered @cf/ adapter with no finetune runtime is
+        # usable (base-model inference).
+        from shiftgate.runtime.backend import CloudflareBackend
+
+        if isinstance(active, CloudflareBackend) and app.state.adapter_reg is not None:
+            for adapter in app.state.adapter_reg.list_adapters():
+                is_cf_base = (adapter.base_model or "").startswith("@cf/")
+                has_finetune = bool((adapter.runtime_name or "").strip())
+                if is_cf_base and not has_finetune:
+                    runtimes.add(adapter.effective_backend_name())
+
         app.state.runtimes_cache = (now, runtimes)
         return runtimes
 
@@ -200,12 +237,13 @@ def create_app(
             )
 
         route_header: str | None = None
+        selected_adapter = None  # AdapterEntry for the non-OpenAI generate() path
+        query = _last_user_message(messages)
 
         # --- model == "auto": run shiftgate's router ---
         if model == "auto":
             from shiftgate.router import router as routing
 
-            query = _last_user_message(messages)
             if not query:
                 return JSONResponse(
                     status_code=400,
@@ -233,8 +271,13 @@ def create_app(
                     },
                 )
 
-            body["model"] = effective_backend_name(match.selected_adapter)
-            route_header = f"{match.selected_adapter.id} ({match.similarity_score:.2f})"
+            selected_adapter = match.selected_adapter
+            body["model"] = effective_backend_name(selected_adapter)
+            route_header = f"{selected_adapter.id} ({match.similarity_score:.2f})"
+        else:
+            # Bypass routing: look up the explicit adapter (needed by non-OpenAI
+            # backends that build the request from the AdapterEntry).
+            selected_adapter = app.state.adapter_reg.get_adapter(model)
 
         # --- resolve the active backend ---
         active = _active_backend()
@@ -244,28 +287,64 @@ def create_app(
                 content={"error": "no inference backend available"},
             )
 
-        url = f"{active.openai_base_url()}/chat/completions"
-        headers = {"Content-Type": "application/json", **active.auth_headers()}
-        forwarder = app.state.forwarder
+        # --- OpenAI-compatible backends: forward raw (existing fast path) ---
+        if active.is_openai_compatible:
+            url = f"{active.openai_base_url()}/chat/completions"
+            headers = {"Content-Type": "application/json", **active.auth_headers()}
+            forwarder = app.state.forwarder
 
-        # --- streaming ---
+            if stream:
+                async def event_gen() -> AsyncIterator[dict[str, str]]:
+                    async for line in forwarder.stream(url, headers, body):
+                        if not line:
+                            continue
+                        s = line.strip()
+                        if not s:
+                            continue
+                        payload = s[len("data:"):].strip() if s.startswith("data:") else s
+                        yield {"data": payload}
+
+                sse_headers = {_ROUTE_HEADER: route_header} if route_header else None
+                return EventSourceResponse(event_gen(), headers=sse_headers)
+
+            status_code, data = await forwarder.complete(url, headers, body)
+            resp_headers = {_ROUTE_HEADER: route_header} if route_header else None
+            return JSONResponse(content=data, status_code=status_code, headers=resp_headers)
+
+        # --- non-OpenAI backends (e.g. Cloudflare): translate via generate() ---
+        backend_label = app.state.backend_router.active_backend_name or "backend"
+
         if stream:
-            async def event_gen() -> AsyncIterator[dict[str, str]]:
-                async for line in forwarder.stream(url, headers, body):
-                    if not line:
-                        continue
-                    s = line.strip()
-                    if not s:
-                        continue
-                    payload = s[len("data:"):].strip() if s.startswith("data:") else s
-                    yield {"data": payload}
+            # TODO(v0.3): wrap generate() output in a single SSE event so
+            # streaming clients work against non-OpenAI backends too.
+            return JSONResponse(
+                status_code=501,
+                content={"error": f"streaming not yet supported for backend: {backend_label}"},
+            )
 
-            sse_headers = {_ROUTE_HEADER: route_header} if route_header else None
-            return EventSourceResponse(event_gen(), headers=sse_headers)
+        if selected_adapter is None:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": (
+                        f"backend '{backend_label}' needs a registered adapter, "
+                        f"but model '{model}' is not in the registry"
+                    )
+                },
+            )
+        if not query:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "no user message found to generate from"},
+            )
 
-        # --- non-streaming ---
-        status_code, data = await forwarder.complete(url, headers, body)
+        try:
+            text = await run_in_threadpool(active.generate, query, selected_adapter)
+        except BackendError as exc:
+            return JSONResponse(status_code=502, content={"error": str(exc)})
+
+        envelope = _openai_envelope(text, body.get("model", model))
         resp_headers = {_ROUTE_HEADER: route_header} if route_header else None
-        return JSONResponse(content=data, status_code=status_code, headers=resp_headers)
+        return JSONResponse(content=envelope, headers=resp_headers)
 
     return app
